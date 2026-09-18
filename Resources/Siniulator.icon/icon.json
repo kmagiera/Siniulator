@@ -1,0 +1,85 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "extended-gray:0.25000,1.00000",
+      "extended-gray:0.00000,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "darken",
+          "fill" : {
+            "solid" : "extended-gray:0.00000,1.00000"
+          },
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "dynamic_island.svg",
+          "name" : "Dynamic Island",
+          "position" : {
+            "scale" : 0.67,
+            "translation-in-points" : [
+              43,
+              412
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    },
+    {
+      "layers" : [
+        {
+          "blend-mode" : "soft-light",
+          "fill" : {
+            "solid" : "extended-srgb:0.00000,0.78431,0.70196,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "phone_bg.svg",
+          "name" : "phone",
+          "opacity" : 0.95,
+          "position" : {
+            "scale" : 0.67,
+            "translation-in-points" : [
+              37.39960937500007,
+              371.125
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

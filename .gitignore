@@ -1,0 +1,44 @@
+# SwiftPM, generated app bundles and test/benchmark output
+/.build/
+/build/
+/.swiftpm/xcode/
+/DerivedData/
+/Benchmarks/Results/
+
+# Xcode's per-user state and generated archives
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.xcresult/
+*.xcarchive/
+*.dSYM/
+*.app/
+*.ipa
+
+# Logs, profiling and coverage output
+*.log
+*.trace
+*.trace/
+*.profraw
+*.profdata
+/coverage/
+__pycache__/
+
+# Captures accidentally saved in the repository root; source assets stay tracked
+/Simulator Screenshot - *.png
+/Simulator Screen Recording - *.mp4
+
+# Local environment files (keep shareable examples)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# macOS metadata and editor temporary files
+.DS_Store
+.AppleDouble
+._*
+*~
+*.swp
+*.swo

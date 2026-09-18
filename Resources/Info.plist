@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleExecutable</key><string>Siniulator</string>
+    <key>CFBundleIdentifier</key><string>app.siniulator.Siniulator</string>
+    <key>CFBundleName</key><string>Siniulator</string>
+    <key>CFBundleDisplayName</key><string>Siniulator</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0.0</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>SUFeedURL</key><string>https://updates.siniulator.app/appcast.xml</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUAutomaticallyUpdate</key><true/>
+    <key>SUEnableSystemProfiling</key><true/>
+    <key>CFBundleURLTypes</key><array><dict>
+        <key>CFBundleURLName</key><string>app.siniulator.Siniulator.open</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>CFBundleURLSchemes</key><array><string>siniulator</string></array>
+    </dict><dict>
+        <key>CFBundleURLName</key><string>app.siniulator.Siniulator.devices</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>CFBundleURLSchemes</key><array><string>devices</string></array>
+    </dict></array>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+</dict></plist>
