@@ -6,6 +6,8 @@ With Xcode 27, [Device Hub](https://developer.apple.com/videos/play/wwdc2026/260
 
 ![Siniulator alongside Xcode on macOS](docs/assets/siniulator-desktop.png)
 
+![Siniulator running multiple iOS simulators on macOS](docs/assets/siniulator-multiple-devices.jpg)
+
 <div align="center">
 
 [![Download for macOS](docs/assets/download-button.svg)](https://updates.siniulator.app/Siniulator.dmg)
