@@ -148,4 +148,30 @@ final class ScreenshotTests: XCTestCase {
             XCTAssertEqual(pixels.width / pixels.height, 1320.0 / 2868.0, accuracy: 0.0001)
         }
     }
+
+    @MainActor func testPreviewDismissalRefreshesHoverStateAfterMovingBetweenPanels() async throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 10, height: 10, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try XCTUnwrap(context.makeImage())
+        let pointer = NSEvent.mouseLocation
+        let panel = NSPanel(contentRect: CGRect(x: pointer.x + 1_000, y: pointer.y + 1_000, width: 100, height: 100),
+            styleMask: .borderless, backing: .buffered, defer: false)
+        defer { panel.close() }
+        let preview = CaptureThumbnail(image: image, fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("preview.png"),
+            kind: .screenshot, cornerRadius: 0)
+        preview.frame = CGRect(x: 10, y: 10, width: 50, height: 50)
+        panel.contentView?.addSubview(preview)
+        let trackingEvent = try XCTUnwrap(NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            eventNumber: 0, trackingNumber: 0, userData: nil))
+        preview.mouseEntered(with: trackingEvent)
+        XCTAssertFalse(preview.bounds.contains(preview.convert(panel.mouseLocationOutsideOfEventStream, from: nil)))
+
+        preview.completePresentation()
+        for _ in 0..<550 where !preview.isFinished {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(preview.isFinished, "A stale hover from the animation panel prevented automatic dismissal")
+    }
 }

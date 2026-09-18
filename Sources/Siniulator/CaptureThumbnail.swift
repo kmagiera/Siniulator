@@ -82,7 +82,13 @@ import UniformTypeIdentifiers
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
     func completePresentation() {
         isPresenting = false
+        refreshPointerState()
         resetDismissTimer()
+    }
+    private func refreshPointerState() {
+        guard let window else { pointerInside = false; return }
+        let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        pointerInside = bounds.contains(location)
     }
     override func updateTrackingAreas() {
         if let pointerTracking { removeTrackingArea(pointerTracking) }
