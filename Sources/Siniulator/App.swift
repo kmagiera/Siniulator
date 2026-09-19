@@ -18,7 +18,7 @@ import Sparkle
     private var isTerminating = false
     private var hasExplicitDeviceRequest = false
 #if DEBUG
-    let capturePreviews = CapturePreviewPresenter(saveDirectory: ["--presentation-smoke", "--recording-smoke"].contains(where: CommandLine.arguments.contains)
+    let capturePreviews = CapturePreviewPresenter(saveDirectory: ["--presentation-smoke", "--recording-smoke", "--duo-smoke"].contains(where: CommandLine.arguments.contains)
         ? Diagnostics.outputDirectory().appendingPathComponent("Saved Captures", isDirectory: true) : nil)
 #else
     let capturePreviews = CapturePreviewPresenter()
@@ -116,6 +116,8 @@ import Sparkle
             Task { await Diagnostics.fullScreenChromeSmoke(app: self); NSApp.terminate(nil) }
         } else if CommandLine.arguments.contains("--rotation-smoke") {
             Task { await Diagnostics.rotationSmoke(app: self); NSApp.terminate(nil) }
+        } else if CommandLine.arguments.contains("--duo-smoke") {
+            Task { await Diagnostics.duoSmoke(app: self); NSApp.terminate(nil) }
         } else if CommandLine.arguments.contains("--presentation-smoke") || CommandLine.arguments.contains("--window-controls-smoke") {
             Task { await Diagnostics.presentationSmoke(app: self); NSApp.terminate(nil) }
         } else if CommandLine.arguments.contains("--smoke") {
@@ -198,7 +200,7 @@ import Sparkle
         } catch { NSAlert(error: error).runModal() }
     }
 #if DEBUG
-    private var isDiagnostic: Bool { ["--smoke", "--exercise", "--presentation-smoke", "--window-controls-smoke", "--fullscreen-chrome-smoke", "--toolbar-smoke", "--rotation-smoke", "--recording-smoke", "--startup-smoke"].contains(where: CommandLine.arguments.contains) }
+    private var isDiagnostic: Bool { ["--smoke", "--exercise", "--presentation-smoke", "--window-controls-smoke", "--fullscreen-chrome-smoke", "--toolbar-smoke", "--rotation-smoke", "--duo-smoke", "--recording-smoke", "--startup-smoke"].contains(where: CommandLine.arguments.contains) }
 #endif
     private func openLastDevice() {
         let last = AppSettings.shared.mostRecentSimulatorID

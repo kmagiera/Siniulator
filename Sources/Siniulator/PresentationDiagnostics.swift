@@ -432,7 +432,7 @@ extension Diagnostics {
                       presentation.controls.windowButtons.allSatisfy({ !$0.isDescendant(of: presentation.controls) }),
                       presentation.canvas.frame == layout.canvas,
                       !presentation.backdrop.isHidden, presentation.backdrop.frame == presentation.bounds,
-                      presentation.backdrop.material == .underWindowBackground, presentation.backdrop.blendingMode == .withinWindow else {
+                      presentation.backdrop.material == .underWindowBackground, presentation.backdrop.blendingMode == .behindWindow else {
                     throw SimulatorError(message: "Full screen header, backdrop or responsive device layout failed at \(size).")
                 }
                 let device = presentation.canvas.geometry.fit(in: presentation.canvas.bounds).rect

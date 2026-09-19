@@ -9,13 +9,13 @@ import Combine
         super.init(nibName: nil, bundle: nil)
         view = revealView
         layoutAttribute = .leading
-        window.titlebarSeparatorStyle = .none
-        window.toolbarStyle = .unified
-        window.toolbar = controls.actions.toolbar
+        prepareLayout(controls.barLayout)
+        controls.attach(to: window)
         window.addTitlebarAccessoryViewController(self)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
     func refresh() { revealView.refresh() }
+    func prepareLayout(_ layout: SimulatorControlBarLayout) { revealView.prepareLayout(layout) }
     nonisolated static func presentationOptions(from proposed: NSApplication.PresentationOptions) -> NSApplication.PresentationOptions {
         proposed.subtracting([.hideMenuBar, .autoHideToolbar]).union(.autoHideMenuBar)
     }
@@ -83,14 +83,18 @@ import Combine
             MainActor.assumeIsolated { self?.refresh() }
         }
     }
-    func refresh() {
-        guard let hostWindow else { onReveal(0); return }
-        guard let controls else { onReveal(0); return }
+    func prepareLayout(_ layout: SimulatorControlBarLayout) {
+        guard let controls else { return }
         // On macOS 26 an expanded toolbar fills leading accessories to both
         // rows. Collapse our title slot in compact mode so the accessory's
         // system clip view cannot cover the centered native action controls.
-        let width = controls.barLayout.isCompact ? 0 : controls.titleWidth + 20
-        if frame.width != width { setFrameSize(CGSize(width: width, height: frame.height)) }
+        let width = layout.isCompact ? 0 : controls.titleWidth + 20
+        let size = CGSize(width: width, height: layout.isCompact ? 0 : SimulatorControlBar.height)
+        if frame.size != size { setFrameSize(size) }
+    }
+    func refresh() {
+        guard let hostWindow else { onReveal(0); return }
+        guard let controls else { onReveal(0); return }
         guard let chromeWindow = window,
               chromeWindow !== hostWindow else { background.removeFromSuperview(); onReveal(0); return }
         // The system moves and tracks its own titlebar. A transparent window

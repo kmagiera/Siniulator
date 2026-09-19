@@ -27,9 +27,11 @@ extension Diagnostics {
             root.canvas.maximumScale = originalMaximum
             root.refreshGeometry()
             root.layoutSubtreeIfNeeded()
-            let curve = root.deviceCornerRadius * (1 - 1 / sqrt(2))
-            let local = CGPoint(x: corner.isLeft ? root.deviceRect.minX + curve : root.deviceRect.maxX - curve,
-                y: corner.isTop ? root.deviceRect.minY + curve : root.deviceRect.maxY - curve)
+            let target = root.resizeTarget(for: corner)
+            let local = CGPoint(x: target.midX, y: target.midY)
+            guard root.resizeCorner(at: local) == corner else {
+                throw SimulatorError(message: "Visible \(corner) did not expose its resize target: \(target), toolbar \(root.controls.frame), device \(root.deviceRect), mode \(String(describing: controller.displayMode)), turns \(controller.screen.quarterTurns).")
+            }
             let pointer = window.convertToScreen(CGRect(origin: root.convert(local, to: nil), size: .zero)).origin
             // Build the entire queue before moving the window. Real mouse events
             // can be queued while AppKit is laying out/compositing the last frame.

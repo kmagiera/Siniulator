@@ -1,235 +1,5 @@
 import AppKit
 
-struct SimulatorControlBarLayout {
-    static let expandedHeight: CGFloat = 52
-    static let compactHeight: CGFloat = 76
-    static let minimumWidth: CGFloat = 300
-    static let controlSize = CGSize(width: 112, height: 36)
-    let isCompact: Bool
-    let height: CGFloat
-    let cornerRadius: CGFloat
-    let buttons: CGRect
-    let name: CGRect
-    let runtime: CGRect
-
-    init(width: CGFloat, titleWidth: CGFloat, isFullScreen: Bool, topInset: CGFloat = 0, fullScreenRevealProgress: CGFloat = 0,
-         isAttachedToScreen: Bool = false) {
-        isCompact = !isFullScreen && width < 102 + titleWidth + 20 + Self.controlSize.width + 8
-        height = isCompact ? Self.compactHeight : Self.expandedHeight
-        cornerRadius = isFullScreen || isAttachedToScreen ? 0 : isCompact ? 16 : height / 2
-        if isCompact {
-            name = CGRect(x: 84, y: 7, width: max(0, width - 96), height: 20)
-            runtime = .zero
-            buttons = CGRect(x: (width - Self.controlSize.width) / 2, y: 32, width: Self.controlSize.width, height: Self.controlSize.height)
-        } else {
-            let left: CGFloat = isFullScreen ? 20 + 88 * min(1, max(0, fullScreenRevealProgress)) : 102
-            buttons = CGRect(x: width - Self.controlSize.width - 8, y: topInset + 8, width: Self.controlSize.width, height: Self.controlSize.height)
-            name = CGRect(x: left, y: topInset + 10, width: max(0, buttons.minX - left - 10), height: 16)
-            runtime = CGRect(x: left, y: topInset + 26, width: name.width, height: 16)
-        }
-    }
-}
-
-@MainActor private final class ControlBarContentView: NSView {
-    override var isFlipped: Bool { true }
-}
-
-@MainActor final class SimulatorControlBar: NSView {
-    static let height = SimulatorControlBarLayout.expandedHeight
-    static let minimumWidth = SimulatorControlBarLayout.minimumWidth
-    // Keep title measurement and rendering consistent, including compact titles.
-    private static let titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-    private static let runtimeFont = NSFont.systemFont(ofSize: 11)
-    private let deviceName: String
-    private let runtimeName: String
-    let titleWidth: CGFloat
-    private let name: NSTextField
-    private let runtime: NSTextField
-    private let nativeName: NSTextField
-    private let nativeRuntime: NSTextField
-    let actions: SimulatorToolbar
-    var actionItems: [NSToolbarItem] { actions.items }
-    private weak var hostWindow: NSWindow?
-    private(set) var fullScreenRevealProgress: CGFloat = 0
-#if DEBUG
-    var presentedTitleFrame: CGRect { name.layer?.presentation()?.frame ?? name.frame }
-#endif
-    let contentView: NSView = ControlBarContentView()
-    let surface: NSView
-    var windowButtons: [NSButton] {
-        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { hostWindow?.standardWindowButton($0) }
-    }
-    var barLayout: SimulatorControlBarLayout {
-        SimulatorControlBarLayout(width: bounds.width, titleWidth: titleWidth, isFullScreen: isFullScreen, topInset: topInset,
-            fullScreenRevealProgress: fullScreenRevealProgress, isAttachedToScreen: isAttachedToScreen)
-    }
-    func height(for width: CGFloat) -> CGFloat {
-        SimulatorControlBarLayout(width: width, titleWidth: titleWidth, isFullScreen: false).height
-    }
-    var topInset: CGFloat = 0 { didSet { needsLayout = true } }
-    var isAttachedToScreen = false {
-        didSet {
-            guard oldValue != isAttachedToScreen else { return }
-            updateStyle(); needsLayout = true
-        }
-    }
-    var isFullScreen = false {
-        didSet {
-            fullScreenRevealProgress = 0
-            updateStyle(); needsLayout = true
-        }
-    }
-    override var isFlipped: Bool { true }
-    init(device: SimulatorDevice, action: @escaping (DeviceCommand) -> Void) {
-        deviceName = device.name
-        runtimeName = device.runtimeName
-        titleWidth = max((device.name as NSString).size(withAttributes: [.font: Self.titleFont]).width,
-            (device.runtimeName as NSString).size(withAttributes: [.font: Self.runtimeFont]).width) + 6
-        name = NSTextField(labelWithString: device.name)
-        runtime = NSTextField(labelWithString: device.runtimeName)
-        nativeName = NSTextField(labelWithString: device.name)
-        nativeRuntime = NSTextField(labelWithString: device.runtimeName)
-        actions = SimulatorToolbar(action: action)
-        if #available(macOS 26, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .regular
-            surface = glass
-        } else {
-            let material = NSVisualEffectView()
-            material.material = .titlebar
-            material.blendingMode = .withinWindow
-            material.state = .followsWindowActiveState
-            material.wantsLayer = true
-            material.layer?.masksToBounds = true
-            material.layer?.cornerCurve = .continuous
-            surface = material
-        }
-        super.init(frame: .zero)
-        wantsLayer = true
-        contentView.wantsLayer = true
-        addSubview(surface)
-        updateStyle()
-        for label in [name, nativeName] {
-            label.font = Self.titleFont
-            label.textColor = .labelColor
-            label.lineBreakMode = .byTruncatingTail
-        }
-        for label in [runtime, nativeRuntime] {
-            label.font = Self.runtimeFont
-            label.textColor = .secondaryLabelColor
-        }
-        contentView.addSubview(name); contentView.addSubview(runtime)
-        updateColors()
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-
-    private func updateStyle() {
-        // Glass tint does not make its backdrop opaque. The outer base covers
-        // the rounded edge; the content fill stops the native backdrop from
-        // transmitting desktop colors in either window activation state.
-        layer?.cornerRadius = barLayout.cornerRadius
-        surface.isHidden = isFullScreen
-        if #available(macOS 26, *), let glass = surface as? NSGlassEffectView {
-            if isFullScreen {
-                glass.contentView = nil
-                if contentView.superview !== self { addSubview(contentView) }
-            } else if glass.contentView !== contentView {
-                contentView.removeFromSuperview()
-                glass.contentView = contentView
-            }
-        } else {
-            let parent = isFullScreen ? self : surface
-            if contentView.superview !== parent { parent.addSubview(contentView) }
-        }
-        updateColors()
-    }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateColors()
-    }
-    private func updateColors() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            let background = NSColor.windowBackgroundColor
-            layer?.backgroundColor = background.cgColor
-            contentView.layer?.backgroundColor = isFullScreen ? nil : background.cgColor
-            if #available(macOS 26, *), let glass = surface as? NSGlassEffectView {
-                glass.tintColor = background
-            }
-        }
-    }
-    func attachWindowButtons(_ window: NSWindow) {
-        // The window owns their parent, frames, targets and grouped hover. Never
-        // extract individual theme widgets or manufacture replacement controls.
-        hostWindow = window
-    }
-    func installNativeTitle(in container: NSView) {
-        container.addSubview(nativeName); container.addSubview(nativeRuntime)
-    }
-    func layoutNativeTitle() {
-        guard let container = nativeName.superview, let nativeWindow = container.window, let hostWindow else { return }
-        // AppKit owns a persistent fullscreen toolbar. Its accessory provides
-        // the title above the toolbar material, using our header coordinates.
-        nativeName.isHidden = !isFullScreen || nativeWindow === hostWindow
-        nativeRuntime.isHidden = nativeName.isHidden
-        nativeName.frame = nativeTitleFrame(barLayout.name)
-        nativeRuntime.frame = nativeTitleFrame(barLayout.runtime)
-    }
-    private func nativeTitleFrame(_ rect: CGRect) -> CGRect {
-        guard let parent = nativeName.superview,
-              let nativeWindow = parent.window, let hostWindow else { return rect }
-        return parent.convert(nativeWindow.convertFromScreen(hostWindow.convertToScreen(convert(rect, to: nil))), from: nil)
-    }
-    func setFullScreenRevealProgress(_ progress: CGFloat) {
-        let progress = isFullScreen ? min(1, max(0, progress)) : 0
-        guard fullScreenRevealProgress != progress else { return }
-        let old = fullScreenRevealProgress
-        fullScreenRevealProgress = progress
-        if abs(progress - old) == 1, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            // Geometry can jump to the endpoint when AppKit animates its window
-            // in WindowServer. Animate only our title, never native controls.
-            let layout = barLayout
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                name.animator().frame = layout.name
-                runtime.animator().frame = layout.runtime
-                nativeName.animator().frame = nativeTitleFrame(layout.name)
-                nativeRuntime.animator().frame = nativeTitleFrame(layout.runtime)
-            }
-        } else {
-            needsLayout = true
-            layoutSubtreeIfNeeded()
-        }
-    }
-    func update(isRecording: Bool, isStoppingRecording: Bool = false) {
-        actions.update(isRecording: isRecording, isStoppingRecording: isStoppingRecording)
-    }
-    override func layout() {
-        super.layout()
-        let layout = barLayout
-        if let hostWindow { actions.layout(in: hostWindow, compact: layout.isCompact) }
-        layer?.cornerRadius = layout.cornerRadius
-        contentView.layer?.cornerRadius = layout.cornerRadius
-        surface.frame = bounds
-        contentView.frame = bounds
-        if #available(macOS 26, *), let glass = surface as? NSGlassEffectView {
-            glass.cornerRadius = layout.cornerRadius
-        } else {
-            surface.layer?.cornerRadius = layout.cornerRadius
-        }
-        name.stringValue = layout.isCompact ? "\(deviceName) – \(runtimeName)" : deviceName
-        name.textColor = layout.isCompact ? .secondaryLabelColor : .labelColor
-        name.frame = layout.name
-        runtime.isHidden = layout.isCompact
-        runtime.frame = layout.runtime
-        layoutNativeTitle()
-    }
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 { window?.performZoom(nil) }
-        else if window?.styleMask.contains(.fullScreen) != true { window?.performDrag(with: event) }
-    }
-}
-
 struct NormalPresentationLayout {
     static let deviceSideMargin: CGFloat = 12
     static let deviceTopMargin: CGFloat = 12
@@ -237,7 +7,8 @@ struct NormalPresentationLayout {
     let header: CGRect
     let canvas: CGRect
 
-    init(bounds: CGRect, headerHeight: CGFloat, device: ChromeGeometry, maximumScale: CGFloat?, showsBezels: Bool = true) {
+    init(bounds: CGRect, headerHeight: CGFloat, device: ChromeGeometry, maximumScale: CGFloat?,
+         showsBezels: Bool = true, topMargin: CGFloat = Self.deviceTopMargin) {
         header = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: min(headerHeight, bounds.height))
         if !showsBezels {
             canvas = CGRect(x: bounds.minX, y: header.maxY, width: bounds.width, height: max(0, bounds.maxY - header.maxY))
@@ -246,8 +17,8 @@ struct NormalPresentationLayout {
         let width = max(0, bounds.width - Self.deviceSideMargin * 2)
         // Align our glass with the native titlebar instead of relocating its
         // widgets. The device canvas retains its inset and aspect ratio.
-        let available = CGRect(x: bounds.minX + Self.deviceSideMargin, y: header.maxY + Self.deviceTopMargin, width: width,
-            height: max(0, bounds.height - headerHeight - Self.deviceTopMargin - Self.deviceBottomMargin))
+        let available = CGRect(x: bounds.minX + Self.deviceSideMargin, y: header.maxY + topMargin, width: width,
+            height: max(0, bounds.height - headerHeight - topMargin - Self.deviceBottomMargin))
         // Normal windows keep the bezel just below their detached toolbar.
         // A restored frame can be taller than the device's aspect ratio needs.
         let fitted = device.fit(in: available, maximumScale: maximumScale)
@@ -278,7 +49,6 @@ struct FullScreenPresentationLayout {
 @MainActor final class DevicePresentationView: NSView {
     let canvas: DeviceCanvasView
     let controls: SimulatorControlBar
-    let wallpaper = DesktopWallpaperView(frame: .zero)
     let backdrop: NSVisualEffectView = SimulatorBackdropView()
     var usesAttachedChrome: Bool { !isFullScreen && !canvas.showsBezels }
     private var fullScreenMenuInset: CGFloat = 0
@@ -291,26 +61,30 @@ struct FullScreenPresentationLayout {
                 fullScreenMenuInset = max(0, screen.frame.maxY - screen.visibleFrame.maxY)
             } else { fullScreenMenuInset = 0 }
             controls.isFullScreen = isFullScreen
-            wallpaper.isHidden = !isFullScreen
-            if !isFullScreen { wallpaper.reset() }
             backdrop.isHidden = !isFullScreen
             needsLayout = true; needsDisplay = true
         }
     }
     override var isFlipped: Bool { true }
     init(screen: SimulatorScreenView, chrome: DeviceChrome, device: SimulatorDevice, action: @escaping (DeviceCommand) -> Void) {
-        canvas = DeviceCanvasView(screen: screen, chrome: chrome)
+        canvas = DeviceCanvasView(screen: screen, chrome: chrome,
+            modelChrome: DeviceChrome.load(for: device, displayMode: .innerFullyOpen))
         controls = SimulatorControlBar(device: device, action: action)
         super.init(frame: .zero)
         wantsLayer = true
         backdrop.material = .underWindowBackground
-        backdrop.blendingMode = .withinWindow
+        // Let WindowServer composite the desktop/full-screen Space. Reading the
+        // configured wallpaper URL would require file access when the user chose
+        // an image outside the system wallpaper directories.
+        backdrop.blendingMode = .behindWindow
         backdrop.state = .active
         backdrop.isHidden = true
-        wallpaper.isHidden = true
         needsLayout = true
-        addSubview(wallpaper); addSubview(backdrop); addSubview(canvas); addSubview(controls)
+        addSubview(backdrop); addSubview(canvas); addSubview(controls)
         canvas.onButton = action
+        canvas.onDuoProjectionWidthChange = { [weak self] _ in
+            self?.needsLayout = true
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
     override func viewDidMoveToWindow() {
@@ -339,29 +113,40 @@ struct FullScreenPresentationLayout {
         layer?.backgroundColor = usesAttachedChrome ? NSColor.black.cgColor : nil
         (window as? DeviceHostWindow)?.updatePresentationBackground()
         backdrop.frame = bounds
-        wallpaper.frame = bounds
         if isFullScreen {
-            wallpaper.refresh()
             let layout = FullScreenPresentationLayout(bounds: bounds, safeAreaInsets: fullScreenSafeAreaInsets)
             controls.topInset = max(0, fullScreenSafeAreaInsets.top)
             controls.frame = layout.header
             canvas.frame = layout.canvas
         } else {
             controls.topInset = 0
-            let width = bounds.width
-            let layout = NormalPresentationLayout(bounds: bounds, headerHeight: controls.height(for: width),
-                device: canvas.geometry, maximumScale: canvas.maximumScale, showsBezels: canvas.showsBezels)
-            controls.frame = layout.header
+            let controlWidth = foldableControlWidth
+            let layout = NormalPresentationLayout(bounds: bounds, headerHeight: controls.height(for: controlWidth),
+                device: canvas.geometry, maximumScale: canvas.maximumScale, showsBezels: canvas.showsBezels,
+                topMargin: normalTopMargin)
+            controls.frame = CGRect(x: bounds.midX - controlWidth / 2, y: layout.header.minY,
+                width: controlWidth, height: layout.header.height)
             canvas.frame = layout.canvas
         }
         controls.needsLayout = true
         canvas.needsLayout = true
         window?.invalidateCursorRects(for: self)
         window?.invalidateShadow()
+        (window as? DeviceHostWindow)?.updateMousePassthrough()
     }
     var deviceRect: CGRect {
         let fit = canvas.fittedGeometry
         return convert(ChromeGeometry.placed(canvas.geometry.rotated(canvas.geometry.body), in: fit.rect, scale: fit.scale), from: canvas)
+    }
+    var visualDeviceRect: CGRect {
+        if let corners = canvas.duoResizeCornerPoints, !corners.isEmpty {
+            let points = corners.values.map { convert($0, from: canvas) }
+            return CGRect(x: points.map(\.x).min()!, y: points.map(\.y).min()!,
+                width: points.map(\.x).max()! - points.map(\.x).min()!,
+                height: points.map(\.y).max()! - points.map(\.y).min()!)
+        }
+        let rect = deviceRect
+        return rect
     }
     var deviceCornerRadius: CGFloat {
         (canvas.showsBezels ? canvas.chrome.outerRadius : canvas.chrome.cornerRadius)
@@ -369,27 +154,56 @@ struct FullScreenPresentationLayout {
     }
     func resizeCorner(at point: CGPoint) -> DeviceResizeCorner? {
         guard !isFullScreen, canvas.showsBezels, !controls.frame.contains(point) else { return nil }
-        return DeviceResizeCorner.allCases.first { $0.hitRect(in: deviceRect, radius: deviceCornerRadius).contains(point) }
+        return DeviceResizeCorner.allCases.first { resizeTarget(for: $0).contains(point) }
+    }
+    var hasTransparentDuoMargins: Bool { !isFullScreen && canvas.usesDuoModel }
+
+    func acceptsMouse(at point: CGPoint) -> Bool {
+        guard hasTransparentDuoMargins else { return true }
+        // Resize handles deliberately extend a few points outside the mesh.
+        // They must stay interactive even where the rendered pixel is clear.
+        if resizeCorner(at: point) != nil { return true }
+        let bar = controls.frame
+        if NSBezierPath(roundedRect: bar, xRadius: bar.height / 2, yRadius: bar.height / 2).contains(point) { return true }
+        return canvas.containsDuoHardware(at: canvas.convert(point, from: self))
+    }
+    func resizeTarget(for corner: DeviceResizeCorner) -> CGRect {
+        if let points = canvas.duoResizeCornerPoints {
+            guard let point = points[corner] else { return .zero }
+            let center = convert(point, from: canvas)
+            return CGRect(x: center.x - 14, y: center.y - 14, width: 28, height: 28)
+        }
+        return corner.hitRect(in: deviceRect, radius: deviceCornerRadius)
     }
     override func resetCursorRects() {
         super.resetCursorRects()
         guard !isFullScreen, canvas.showsBezels else { return }
         addCursorRect(bounds, cursor: .arrow)
         for corner in DeviceResizeCorner.allCases {
-            addCursorRect(corner.hitRect(in: deviceRect, radius: deviceCornerRadius).intersection(bounds), cursor: corner.cursor)
+            addCursorRect(resizeTarget(for: corner).intersection(bounds), cursor: corner.cursor)
         }
     }
     func normalSize(scale: CGFloat) -> CGSize {
         let size = canvas.geometry.size
         let horizontalMargin = NormalPresentationLayout.deviceSideMargin * 2
-        let verticalMargin = NormalPresentationLayout.deviceTopMargin + NormalPresentationLayout.deviceBottomMargin
-        let width = max(SimulatorControlBar.minimumWidth + horizontalMargin, size.width * scale + (canvas.showsBezels ? horizontalMargin : 0))
+        let verticalMargin = normalTopMargin + NormalPresentationLayout.deviceBottomMargin
+        let width = max(controls.minimumCompactWidth + horizontalMargin, size.width * scale + (canvas.showsBezels ? horizontalMargin : 0))
         return CGSize(width: width, height: size.height * scale + controls.height(for: width) + (canvas.showsBezels ? verticalMargin : 0))
     }
     func normalScaleToFit(in size: CGSize) -> CGFloat {
         let layout = NormalPresentationLayout(bounds: CGRect(origin: .zero, size: size), headerHeight: controls.height(for: size.width),
-            device: canvas.geometry, maximumScale: nil, showsBezels: canvas.showsBezels)
+            device: canvas.geometry, maximumScale: nil, showsBezels: canvas.showsBezels, topMargin: normalTopMargin)
         return canvas.geometry.fit(in: layout.canvas).scale
     }
     func refreshGeometry() { needsLayout = true; canvas.needsLayout = true; canvas.needsDisplay = true }
+
+    private var normalTopMargin: CGFloat {
+        canvas.chrome.displayMode == nil ? NormalPresentationLayout.deviceTopMargin : 0
+    }
+    private var foldableControlWidth: CGFloat {
+        guard canvas.showsBezels, canvas.chrome.displayMode != nil else { return bounds.width }
+        let expanded = max(0, bounds.width - NormalPresentationLayout.deviceSideMargin * 2)
+        return controls.metrics.pillWidth(availableWidth: bounds.width, deviceWidth: expanded,
+            projectedFraction: canvas.duoProjectionWidthFraction, closedFraction: canvas.duoClosedProjectionWidthFraction)
+    }
 }

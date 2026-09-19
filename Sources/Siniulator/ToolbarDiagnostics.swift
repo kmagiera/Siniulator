@@ -35,7 +35,7 @@ extension Diagnostics {
             let root = ToolbarSmokeRoot()
             window.contentView = root
             root.addSubview(bar)
-            bar.attachWindowButtons(window)
+            bar.attach(to: window)
             let chrome = FullScreenChrome(window: window, controls: bar) { _ in }
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()

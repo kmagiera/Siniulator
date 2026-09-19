@@ -28,8 +28,11 @@
 - (id)descriptor;
 - (id)state;
 - (unsigned int)displayClass;
+- (unsigned int)defaultWidthForDisplay;
+- (unsigned int)defaultHeightForDisplay;
 @end
 @protocol SIScreen <NSObject>
+- (unsigned int)screenID;
 - (id)framebufferSurface;
 - (id)ioSurface;
 - (void)registerScreenCallbacksWithUUID:(NSUUID *)uuid callbackQueue:(dispatch_queue_t)queue frameCallback:(void (^)(void))frame surfacesChangedCallback:(void (^)(id, id))surfaces propertiesChangedCallback:(void (^)(id))properties;
@@ -40,6 +43,9 @@
 - (void)unregisterIOSurfacesChangeCallbackWithUUID:(NSUUID *)uuid;
 - (void)unregisterIOSurfaceChangeCallbackWithUUID:(NSUUID *)uuid;
 - (void)unregisterDamageRectanglesCallbackWithUUID:(NSUUID *)uuid;
+@end
+@protocol SIScreenAdapter <NSObject>
+- (void)enumerateScreensWithCompletionQueue:(dispatch_queue_t)queue completionHandler:(void (^)(NSArray *))handler;
 @end
 @protocol SIHIDClient <NSObject>
 - (id)initWithDevice:(id)device error:(NSError **)error;
@@ -53,6 +59,75 @@ static void SIException(NSError **error, NSException *exception) {
     if (error) *error = SIError([NSString stringWithFormat:@"%@: %@", exception.name, exception.reason]);
 }
 static void *SIKit;
+
+NSArray *SIEnumerateScreens(id adapter, NSTimeInterval timeout) {
+    __block NSArray *screens = nil;
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    [(id<SIScreenAdapter>)adapter enumerateScreensWithCompletionQueue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0) completionHandler:^(NSArray *value) {
+        screens = value;
+        dispatch_semaphore_signal(ready);
+    }];
+    // Only a successful wait establishes ordering with the callback's write.
+    // On timeout the block owns the remaining storage; do not read it here.
+    if (dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC))) != 0) return @[];
+    return screens ?: @[];
+}
+
+static id SISurface(id<SIScreen> screen) {
+    id surface = nil;
+    @try { surface = [screen framebufferSurface]; } @catch (NSException *e) {}
+    if (!surface) { @try { surface = [screen ioSurface]; } @catch (NSException *e) {} }
+    return surface;
+}
+
+static uint64_t SISurfaceArea(id surface) {
+    if (!surface || CFGetTypeID((__bridge CFTypeRef)surface) != IOSurfaceGetTypeID()) return 0;
+    return (uint64_t)IOSurfaceGetWidth((__bridge IOSurfaceRef)surface)
+        * (uint64_t)IOSurfaceGetHeight((__bridge IOSurfaceRef)surface);
+}
+
+static id<SIScreen> SIPreferredScreen(NSArray *screens, uint32_t desiredScreenID,
+                                      uint32_t desiredWidth, uint32_t desiredHeight, id *selectedSurface) {
+    id<SIScreen> selected = nil;
+    uint64_t selectedArea = 0;
+    for (id<SIScreen> screen in screens) {
+        if (![screen conformsToProtocol:NSProtocolFromString(@"SimDisplayIOSurfaceRenderable")]) continue;
+        id<SIIO> state = [(id<SIIO>)screen state];
+        if ([state displayClass] != 0) continue;
+        id surface = SISurface(screen);
+        if (desiredScreenID != 0) {
+            uint32_t screenID = 0;
+            BOOL exposesScreenID = [screen respondsToSelector:@selector(screenID)];
+            if (exposesScreenID) {
+                @try { screenID = [screen screenID]; } @catch (NSException *e) { exposesScreenID = NO; }
+            }
+            BOOL matches = exposesScreenID && screenID == desiredScreenID;
+            if (!matches && desiredWidth != 0 && desiredHeight != 0) {
+                uint32_t width = 0, height = 0;
+                @try {
+                    width = [state defaultWidthForDisplay];
+                    height = [state defaultHeightForDisplay];
+                } @catch (NSException *e) {}
+                matches = (width == desiredWidth && height == desiredHeight)
+                    || (width == desiredHeight && height == desiredWidth);
+                if (!matches && surface && CFGetTypeID((__bridge CFTypeRef)surface) == IOSurfaceGetTypeID()) {
+                    size_t surfaceWidth = IOSurfaceGetWidth((__bridge IOSurfaceRef)surface);
+                    size_t surfaceHeight = IOSurfaceGetHeight((__bridge IOSurfaceRef)surface);
+                    matches = (surfaceWidth == desiredWidth && surfaceHeight == desiredHeight)
+                        || (surfaceWidth == desiredHeight && surfaceHeight == desiredWidth);
+                }
+            }
+            if (!matches) continue;
+        }
+        uint64_t area = SISurfaceArea(surface);
+        if (!selected || area > selectedArea) {
+            selected = screen;
+            selectedArea = area;
+            if (selectedSurface) *selectedSurface = surface;
+        }
+    }
+    return selected;
+}
 
 @implementation SICoreSimulator {
     id _context;
@@ -219,23 +294,41 @@ static void *SIKit;
     dispatch_queue_t _queue;
 }
 - (instancetype)initWithDevice:(id)device error:(NSError **)error {
+    return [self initWithDevice:device screenID:0 width:0 height:0 error:error];
+}
+- (instancetype)initWithDevice:(id)device screenID:(uint32_t)screenID width:(uint32_t)width height:(uint32_t)height error:(NSError **)error {
     self = [super init];
     if (!self) return nil;
     @try {
         NSArray *ports = [(id<SIIO>)[(id<SIDevice>)device io] ioPorts];
+        id<SIScreenAdapter> adapter = nil;
         for (id<SIIO> port in ports) {
             id descriptor = [port descriptor];
-            if (![descriptor conformsToProtocol:NSProtocolFromString(@"SimDisplayIOSurfaceRenderable")]) continue;
-            if (!_screen) _screen = descriptor;
-            id<SIIO> state = [(id<SIIO>)descriptor state];
-            if ([state displayClass] == 0) { _screen = descriptor; break; }
+            if ([descriptor conformsToProtocol:NSProtocolFromString(@"SimScreenAdapter")]) { adapter = descriptor; break; }
+        }
+        if (adapter && [adapter respondsToSelector:@selector(enumerateScreensWithCompletionQueue:completionHandler:)]) {
+            NSArray *screens = SIEnumerateScreens(adapter, 1);
+            id surface = nil;
+            _screen = SIPreferredScreen(screens ?: @[], screenID, width, height, &surface);
+            _surface = surface;
         }
         if (!_screen) {
-            if (error) *error = SIError(@"The simulator display is not ready yet.");
+            NSMutableArray *screens = [NSMutableArray array];
+            for (id<SIIO> port in ports) {
+                id descriptor = [port descriptor];
+                if ([descriptor conformsToProtocol:NSProtocolFromString(@"SimDisplayIOSurfaceRenderable")]) [screens addObject:descriptor];
+            }
+            id surface = nil;
+            _screen = SIPreferredScreen(screens, screenID, width, height, &surface);
+            _surface = surface;
+        }
+        if (!_screen) {
+            if (error) *error = screenID == 0
+                ? SIError(@"The simulator display is not ready yet.")
+                : SIError([NSString stringWithFormat:@"Simulator screen %u is not ready yet.", screenID]);
             return nil;
         }
-        @try { _surface = [_screen framebufferSurface]; } @catch (NSException *e) {}
-        if (!_surface) { @try { _surface = [_screen ioSurface]; } @catch (NSException *e) {} }
+        if (!_surface) _surface = SISurface(_screen);
         _token = [NSUUID UUID];
         _queue = dispatch_queue_create("Siniulator.display", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
     } @catch (NSException *exception) { SIException(error, exception); return nil; }

@@ -3,6 +3,31 @@ import XCTest
 @testable import Siniulator
 
 final class GeometryTests: XCTestCase {
+    func testDuoPresetAnimationEasesBothEndsWithoutOvershooting() {
+        for (start, target) in [(0.0, 180.0), (180, 0), (60, 120), (120, 60)] {
+            let animation = DuoHingeAnimation(start: start, target: target)
+            XCTAssertEqual(animation.angle(at: -1), start)
+            XCTAssertEqual(animation.angle(at: 0), start)
+            XCTAssertEqual(animation.angle(at: 1), target)
+            XCTAssertEqual(animation.angle(at: 2), target)
+            XCTAssertEqual(animation.angle(at: 0.5), (start + target) / 2, accuracy: 1e-9)
+            let distance = abs(target - start)
+            XCTAssertLessThan(abs(animation.angle(at: 0.1) - start), distance * 0.02)
+            XCTAssertLessThan(abs(target - animation.angle(at: 0.9)), distance * 0.02)
+            var previous = start
+            for step in 1...100 {
+                let current = animation.angle(at: Double(step) / 100)
+                XCTAssertTrue((min(start, target)...max(start, target)).contains(current))
+                XCTAssertGreaterThanOrEqual((current - previous) * (target - start), 0)
+                previous = current
+            }
+        }
+        let closing = DuoHingeAnimation(start: 180, target: 0)
+        let visible = closing.angle(at: 0.4)
+        let retargeted = DuoHingeAnimation(start: visible, target: 120)
+        XCTAssertEqual(retargeted.angle(at: 0), visible, "Retargeting must not jump to the previous preset")
+    }
+
     @MainActor func testBezelArtworkDrawsEveryEdgeWithoutAnUnusedScreenAsset() async throws {
         let edge = NSImage(size: CGSize(width: 10, height: 10), flipped: true) { bounds in
             NSColor.red.setFill()
@@ -61,6 +86,13 @@ final class GeometryTests: XCTestCase {
             XCTAssertEqual(result.y, expected[turns].y, accuracy: 0.00001)
         }
     }
+    func testNativeDisplayRotationIsAddedToGuestOrientation() {
+        XCTAssertEqual(ScreenGeometry.nativeQuarterTurns(degrees: 270), 1)
+        XCTAssertEqual(ScreenGeometry.displayQuarterTurns(orientation: 0, nativeRotation: 3), 3)
+        XCTAssertEqual(ScreenGeometry.displayQuarterTurns(orientation: 1, nativeRotation: 3), 0)
+        XCTAssertEqual(ScreenGeometry.displayQuarterTurns(orientation: 2, nativeRotation: 3), 1)
+        XCTAssertEqual(ScreenGeometry.displayQuarterTurns(orientation: 3, nativeRotation: 3), 2)
+    }
     func testSystemGestureEdges() {
         XCTAssertEqual(ScreenGeometry.edge(CGPoint(x: 0.5, y: 0.99)), 3)
         XCTAssertEqual(ScreenGeometry.edge(CGPoint(x: 0.5, y: 0.01)), 1)
@@ -79,6 +111,35 @@ final class GeometryTests: XCTestCase {
         XCTAssertEqual(KeyboardMap.usages[51], 42)
         XCTAssertEqual(KeyboardMap.usages[123], 80)
     }
+    func testFoldableHingePayloadEncodesPresetAngles() throws {
+        XCTAssertEqual(DeviceDisplayMode.cover.hingeAngle, 0)
+        XCTAssertEqual(DeviceDisplayMode.innerPartiallyOpen.hingeAngle, 120)
+        XCTAssertEqual(DeviceDisplayMode.innerFullyOpen.hingeAngle, 180)
+        for angle in [0.0, 120.0, 180.0] {
+            let data = try XCTUnwrap(SimulatorInput.hingeEventData(angle: angle))
+            let encodedAngle = withUnsafeBytes(of: angle.bitPattern.littleEndian) { Data($0) }
+            XCTAssertNotNil(data.range(of: encodedAngle))
+            let text = String(decoding: data, as: UTF8.self)
+            XCTAssertTrue(text.contains("hinge-slider-control"))
+            XCTAssertTrue(text.contains("range"))
+        }
+        let orientationValues = ["portrait", "landscape-right", "pud", "landscape-left"]
+        for (turns, expected) in orientationValues.enumerated() {
+            let data = try XCTUnwrap(SimulatorInput.orientationEventData(quarterTurns: turns))
+            XCTAssertGreaterThan(data.count, 100)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(expected))
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("orientation-picker-control"))
+        }
+    }
+
+    func testContinuousHingeAngleChoosesTheVisibleDuoPanel() {
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 0), .cover)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 15), .cover)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 15.1), .innerPartiallyOpen)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 120), .innerPartiallyOpen)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 179), .innerPartiallyOpen)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 180), .innerFullyOpen)
+    }
     func testDeviceFrameKeepsItsScreenInsideTheBezelAfterRotation() {
         for turn in 0..<4 {
             let geometry = ChromeGeometry(screenSize: CGSize(width: 400, height: 800), border: NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20),
@@ -90,5 +151,23 @@ final class GeometryTests: XCTestCase {
             XCTAssertEqual(fit.rect.midX, 500, accuracy: 0.0001)
             XCTAssertEqual(fit.rect.midY, 350, accuracy: 0.0001)
         }
+    }
+
+    @MainActor func testFoldableMapsCoverAndInnerDisplayModes() {
+        let displays: [[String: Any]] = [
+            ["displayType": "integrated", "deviceName": "primary", "screenID": 1, "width": 1398, "height": 2034, "nativeRotation": 0],
+            ["displayType": "integrated", "deviceName": "primary-1", "screenID": 3, "width": 2007, "height": 2853, "nativeRotation": 270],
+            ["displayType": "tvOut", "deviceName": "external-0", "width": 7680, "height": 4320]
+        ]
+        let selected = DeviceChrome.preferredDisplay(in: displays)
+        XCTAssertEqual(selected["deviceName"] as? String, "primary-1")
+        XCTAssertEqual(selected["nativeRotation"] as? Int, 270)
+        XCTAssertEqual(DeviceChrome.preferredDigitizerTarget(in: displays), 3)
+        let cover = DeviceChrome.preferredDisplay(in: displays, displayMode: .cover)
+        XCTAssertEqual(cover["deviceName"] as? String, "primary")
+        XCTAssertEqual(DeviceChrome.preferredDigitizerTarget(in: displays, displayMode: .cover), 1)
+        XCTAssertEqual(DeviceChrome.preferredDisplay(in: displays, displayMode: .innerPartiallyOpen)["screenID"] as? Int, 3)
+        XCTAssertEqual(DeviceChrome.preferredDisplay(in: displays, displayMode: .innerFullyOpen)["screenID"] as? Int, 3)
+        XCTAssertEqual(DeviceChrome.preferredDigitizerTarget(in: [displays[0]]), 0)
     }
 }

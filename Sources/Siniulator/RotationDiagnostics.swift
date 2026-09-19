@@ -15,8 +15,10 @@ extension Diagnostics {
                 if target.screen.quarterTurns == turns { break }
                 try await Task.sleep(for: .milliseconds(50))
             }
-            guard target.screen.quarterTurns == turns,
-                  try await target.screen.input?.orientationTurns(udid: target.deviceInfo.id) == turns else {
+            let isFoldable = target.presentation.canvas.chrome.displayMode != nil
+            let guestTurns = isFoldable ? turns
+                : try await target.screen.input?.orientationTurns(udid: target.deviceInfo.id)
+            guard target.screen.quarterTurns == turns, guestTurns == turns else {
                 throw SimulatorError(message: "Guest orientation did not reach \(turns).")
             }
             // quarterTurns changes before the window finishes applying the

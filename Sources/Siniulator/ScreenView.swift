@@ -14,6 +14,12 @@ enum ScreenGeometry {
     }
 
     static func normalizedQuarterTurns(_ turns: Int) -> Int { (turns % 4 + 4) % 4 }
+    static func nativeQuarterTurns(degrees: Int) -> Int {
+        normalizedQuarterTurns(-(degrees / 90))
+    }
+    static func displayQuarterTurns(orientation: Int, nativeRotation: Int) -> Int {
+        normalizedQuarterTurns(orientation + nativeRotation)
+    }
 
     static func originalPoint(_ point: CGPoint, quarterTurns: Int) -> CGPoint {
         switch normalizedQuarterTurns(quarterTurns) {
@@ -40,8 +46,78 @@ enum ScreenGeometry {
     }
 }
 
+// CoreSimulator can emit several damage/surface callbacks before AppKit runs.
+// Coalesce them without waiting for a drawable (the 2D layer is hidden on Duo).
+final class DisplayFrameDelivery: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = false
+    private let handler: @MainActor @Sendable () -> Void
+
+    init(handler: @escaping @MainActor @Sendable () -> Void) { self.handler = handler }
+
+    func requestFrame() {
+        lock.lock()
+        let schedule = !pending
+        pending = true
+        lock.unlock()
+        guard schedule else { return }
+        DispatchQueue.main.async { [self] in
+            lock.lock(); pending = false; lock.unlock()
+            handler()
+        }
+    }
+}
+
+/// A sibling of the touchscreen, so suspending its Metal layer on Duo does
+/// not also hide the host's two-finger gesture feedback.
+@MainActor final class SimulatorGestureOverlay: NSView {
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 @MainActor final class SimulatorScreenView: NSView {
-    var display: SIDisplay? { didSet { renderer.setDisplay(display) } }
+    lazy var frameDelivery = DisplayFrameDelivery { [weak self] in
+        guard let self else { return }
+        onDisplayChange?(display)
+    }
+    func frameHandler(observesSurfaceChanges: Bool) -> @Sendable () -> Void {
+        let renderer = renderer
+        let delivery = observesSurfaceChanges ? frameDelivery : nil
+        return { [weak renderer] in
+            // Preserve off-main rendering for ordinary devices.
+            renderer?.requestFrame()
+            delivery?.requestFrame()
+        }
+    }
+    var display: SIDisplay? {
+        didSet {
+            if display == nil { displayChrome = nil }
+            renderer.setDisplay(display)
+            onDisplayChange?(display)
+        }
+    }
+    // The layout can already show the next pose while its framebuffer is still
+    // connecting. Keep the source panel separate from the requested pose.
+    private(set) var displayChrome: DeviceChrome?
+    func setDisplay(_ display: SIDisplay, chrome: DeviceChrome) {
+        displayChrome = chrome
+        nativeQuarterTurns = chrome.nativeQuarterTurns
+        self.display = display
+    }
+    var onDisplayChange: ((SIDisplay?) -> Void)?
+    var magnifyHandler: ((NSEvent) -> Bool)?
+    var coordinateMapper: ((_ point: CGPoint, _ clamped: Bool) -> CGPoint?)? {
+        didSet {
+            if (oldValue == nil) != (coordinateMapper == nil) {
+                endContact()
+                multitouch = MultitouchState()
+                fingerLayers.forEach { $0.isHidden = true }; gestureCenter.isHidden = true
+            }
+        }
+    }
+    var coordinateProjector: ((CGPoint) -> CGPoint?)?
+    let gestureOverlay = SimulatorGestureOverlay()
+    private var gestureQuarterTurns: Int { coordinateMapper == nil ? displayQuarterTurns : 0 }
     var input: SimulatorInput?
     var keyboardEnabled = true {
         didSet { if !keyboardEnabled { releaseKeys() } }
@@ -52,6 +128,16 @@ enum ScreenGeometry {
             configureRenderer()
             needsDisplay = true
         }
+    }
+    var nativeQuarterTurns = 0 {
+        didSet {
+            nativeQuarterTurns = ScreenGeometry.normalizedQuarterTurns(nativeQuarterTurns)
+            configureRenderer()
+            needsDisplay = true
+        }
+    }
+    var displayQuarterTurns: Int {
+        ScreenGeometry.displayQuarterTurns(orientation: quarterTurns, nativeRotation: nativeQuarterTurns)
     }
     let renderer: ScreenRenderer
     private var contact: CGPoint?
@@ -71,18 +157,19 @@ enum ScreenGeometry {
         self.renderer = renderer
         super.init(frame: .zero)
         wantsLayer = true
+        gestureOverlay.wantsLayer = true
         for finger in fingerLayers {
             finger.fillColor = NSColor.white.withAlphaComponent(0.25).cgColor
             finger.strokeColor = NSColor.white.withAlphaComponent(0.9).cgColor
             finger.lineWidth = 2
             finger.isHidden = true
-            layer?.addSublayer(finger)
+            gestureOverlay.layer?.addSublayer(finger)
         }
         gestureCenter.fillColor = NSColor.clear.cgColor
         gestureCenter.strokeColor = NSColor.white.withAlphaComponent(0.65).cgColor
         gestureCenter.lineWidth = 1
         gestureCenter.isHidden = true
-        layer?.addSublayer(gestureCenter)
+        gestureOverlay.layer?.addSublayer(gestureCenter)
         registerForDraggedTypes([.fileURL])
         setAccessibilityLabel("Simulator touchscreen")
         setAccessibilityRole(.image)
@@ -97,9 +184,10 @@ enum ScreenGeometry {
         guard let surface = display?.surface as? IOSurface else { return nil }
         let image = CIImage(ioSurface: surface)
         let orientations: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
-        return image.oriented(orientations[quarterTurns % 4])
+        return image.oriented(orientations[displayQuarterTurns])
     }
 #if DEBUG
+    var diagnosticContacts: [CGPoint] { [contact, secondContact].compactMap { $0 } }
     func screenshot() -> CGImage? {
         guard let image = currentImage() else { return nil }
         return renderer.engine.images.createCGImage(image, from: image.extent)
@@ -111,27 +199,33 @@ enum ScreenGeometry {
     override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); configureRenderer() }
     override func updateLayer() { renderer.requestFrame() }
     private func configureRenderer() {
-        renderer.configure(size: bounds.size, scale: window?.backingScaleFactor ?? 2, turns: quarterTurns)
+        renderer.configure(size: bounds.size, scale: window?.backingScaleFactor ?? 2,
+                           turns: displayQuarterTurns)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         fingerLayers.forEach { $0.frame = bounds }; gestureCenter.frame = bounds
         CATransaction.commit()
     }
     var framebufferSize: CGSize {
         guard let surface = display?.surface as? IOSurface else { return .zero }
-        return quarterTurns % 2 == 0 ? CGSize(width: surface.width, height: surface.height) : CGSize(width: surface.height, height: surface.width)
+        return displayQuarterTurns % 2 == 0
+            ? CGSize(width: surface.width, height: surface.height)
+            : CGSize(width: surface.height, height: surface.width)
     }
 
     private func normalized(_ event: NSEvent, clamped: Bool = false) -> CGPoint? {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        if let coordinateMapper { return coordinateMapper(viewPoint, clamped) }
         let size = framebufferSize
         guard size.width > 0, size.height > 0 else { return nil }
         let rect = ScreenGeometry.imageRect(image: size, in: bounds)
         guard !rect.isEmpty else { return nil }
-        let point = convert(event.locationInWindow, from: nil)
+        let point = viewPoint
         guard clamped || rect.contains(point) else { return nil }
         let normalized = CGPoint(x: min(1, max(0, (point.x - rect.minX) / rect.width)),
                                  y: min(1, max(0, (point.y - rect.minY) / rect.height)))
-        return ScreenGeometry.originalPoint(normalized, quarterTurns: quarterTurns)
+        return ScreenGeometry.originalPoint(normalized, quarterTurns: displayQuarterTurns)
     }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         endContact()
@@ -139,9 +233,9 @@ enum ScreenGeometry {
         contact = point
         edge = ScreenGeometry.edge(point)
         if event.modifierFlags.contains(.option) {
-            updateFingers(event)
-            contact = ScreenGeometry.originalPoint(multitouch.first, quarterTurns: quarterTurns)
-            secondContact = ScreenGeometry.originalPoint(multitouch.second, quarterTurns: quarterTurns)
+            guard updateFingers(event) else { contact = nil; return }
+            contact = ScreenGeometry.originalPoint(multitouch.first, quarterTurns: gestureQuarterTurns)
+            secondContact = ScreenGeometry.originalPoint(multitouch.second, quarterTurns: gestureQuarterTurns)
             edge = 0
             // The host gesture modifiers must not stick on the guest keyboard.
             for usage in modifiers.intersection([0xe1, 0xe2]) { input?.key(usage, down: false); modifiers.remove(usage) }
@@ -152,9 +246,9 @@ enum ScreenGeometry {
         guard contact != nil, let point = normalized(event, clamped: true) else { return }
         contact = point
         if secondContact != nil {
-            updateFingers(event)
-            contact = ScreenGeometry.originalPoint(multitouch.first, quarterTurns: quarterTurns)
-            secondContact = ScreenGeometry.originalPoint(multitouch.second, quarterTurns: quarterTurns)
+            guard updateFingers(event) else { return }
+            contact = ScreenGeometry.originalPoint(multitouch.first, quarterTurns: gestureQuarterTurns)
+            secondContact = ScreenGeometry.originalPoint(multitouch.second, quarterTurns: gestureQuarterTurns)
         }
         input?.touch(contact!, phase: .move, edge: edge, second: secondContact)
     }
@@ -162,8 +256,8 @@ enum ScreenGeometry {
         if contact != nil {
             if secondContact != nil {
                 updateFingers(event)
-                contact = ScreenGeometry.originalPoint(multitouch.first, quarterTurns: quarterTurns)
-                secondContact = ScreenGeometry.originalPoint(multitouch.second, quarterTurns: quarterTurns)
+                contact = ScreenGeometry.originalPoint(multitouch.first, quarterTurns: gestureQuarterTurns)
+                secondContact = ScreenGeometry.originalPoint(multitouch.second, quarterTurns: gestureQuarterTurns)
             } else { contact = normalized(event, clamped: true) ?? contact }
         }
         endContact()
@@ -186,7 +280,7 @@ enum ScreenGeometry {
         let rect = ScreenGeometry.imageRect(image: framebufferSize, in: bounds)
         guard rect.width > 0, rect.height > 0, let current = scrollPoint else { return }
         let delta = ScreenGeometry.originalPoint(CGPoint(x: 0.5 + event.scrollingDeltaX * factor / rect.width,
-                                                         y: 0.5 + event.scrollingDeltaY * factor / rect.height), quarterTurns: quarterTurns)
+                                                         y: 0.5 + event.scrollingDeltaY * factor / rect.height), quarterTurns: displayQuarterTurns)
         let point = CGPoint(x: min(0.98, max(0.02, current.x + delta.x - 0.5)),
                             y: min(0.98, max(0.02, current.y + delta.y - 0.5)))
         scrollPoint = point
@@ -197,16 +291,17 @@ enum ScreenGeometry {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: end)
     }
     override func magnify(with event: NSEvent) {
+        if magnifyHandler?(event) == true { return }
         if event.phase == .began || secondContact == nil {
             endContact()
             pinchDistance = 0.15
-            contact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 - pinchDistance, y: 0.5), quarterTurns: quarterTurns)
-            secondContact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 + pinchDistance, y: 0.5), quarterTurns: quarterTurns)
+            contact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 - pinchDistance, y: 0.5), quarterTurns: displayQuarterTurns)
+            secondContact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 + pinchDistance, y: 0.5), quarterTurns: displayQuarterTurns)
             input?.touch(contact!, phase: .start, second: secondContact)
         }
         pinchDistance = min(0.45, max(0.02, pinchDistance + event.magnification * 0.3))
-        contact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 - pinchDistance, y: 0.5), quarterTurns: quarterTurns)
-        secondContact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 + pinchDistance, y: 0.5), quarterTurns: quarterTurns)
+        contact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 - pinchDistance, y: 0.5), quarterTurns: displayQuarterTurns)
+        secondContact = ScreenGeometry.originalPoint(CGPoint(x: 0.5 + pinchDistance, y: 0.5), quarterTurns: displayQuarterTurns)
         input?.touch(contact!, phase: .move, second: secondContact)
         if event.phase == .ended || event.phase == .cancelled { endContact() }
     }
@@ -251,24 +346,36 @@ enum ScreenGeometry {
             fingerLayers.forEach { $0.isHidden = true }; gestureCenter.isHidden = true
         }
     }
-    private func updateFingers(_ event: NSEvent) {
+    @discardableResult private func updateFingers(_ event: NSEvent) -> Bool {
         let rect = ScreenGeometry.imageRect(image: framebufferSize, in: bounds)
-        guard rect.width > 0, rect.height > 0 else { return }
+        guard rect.width > 0, rect.height > 0 else { return false }
         let p = ScreenGeometry.pointerLocation(for: event, in: self)
         // Clamp the contacts in MultitouchState, not the cursor. A drag beyond
         // the view must still be able to move relative to its Shift anchor.
-        let pointer = CGPoint(x: (p.x - rect.minX) / rect.width, y: (p.y - rect.minY) / rect.height)
+        let pointer: CGPoint
+        if let coordinateMapper {
+            guard let mapped = coordinateMapper(p, true) else { return false }
+            pointer = mapped
+        } else {
+            pointer = CGPoint(x: (p.x - rect.minX) / rect.width, y: (p.y - rect.minY) / rect.height)
+        }
         multitouch.update(pointer: pointer, translating: event.modifierFlags.contains(.shift))
+        func project(_ point: CGPoint) -> CGPoint? {
+            if let coordinateProjector { return coordinateProjector(point) }
+            return CGPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height)
+        }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         for (finger, point) in zip(fingerLayers, [multitouch.first, multitouch.second]) {
-            let local = CGPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height)
+            guard let local = project(point) else { finger.isHidden = true; continue }
             finger.path = CGPath(ellipseIn: CGRect(x: local.x - 13, y: local.y - 13, width: 26, height: 26), transform: nil)
             finger.isHidden = false
         }
-        let center = CGPoint(x: rect.minX + multitouch.center.x * rect.width, y: rect.minY + multitouch.center.y * rect.height)
-        gestureCenter.path = CGPath(ellipseIn: CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6), transform: nil)
-        gestureCenter.isHidden = false
+        if let center = project(multitouch.center) {
+            gestureCenter.path = CGPath(ellipseIn: CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6), transform: nil)
+            gestureCenter.isHidden = false
+        } else { gestureCenter.isHidden = true }
         CATransaction.commit()
+        return true
     }
     func releaseKeys() {
         for usage in heldKeys.union(modifiers) { input?.key(usage, down: false) }

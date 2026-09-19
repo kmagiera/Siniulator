@@ -10,8 +10,9 @@ scripts/check-release-diagnostics.sh
 ```
 
 Swift tests cover input, geometry, scaling, appearance, native controls, captures
-and recording. AppKit tests create local windows without booting a simulator;
-the wallpaper integration test skips when the desktop image is unavailable.
+and recording. AppKit tests create local windows without booting a simulator.
+Fullscreen uses AppKit's behind-window composition and never resolves or opens
+the configured wallpaper URL, whether it points to a system or user file.
 Script tests use temporary files and stubbed external tools; they do not build,
 sign, notarize or publish an app. The diagnostics check builds Debug and Release
 and inspects both binaries to ensure test hooks stay out of normal releases.
@@ -64,14 +65,14 @@ checks are skipped. AppKit snapshots alone cannot verify glass or desktop effect
 Leave a simulator booted and run:
 
 ```sh
-scripts/check-fullscreen-chrome.sh 0 --expect-backdrop-variation
 scripts/check-fullscreen-chrome.sh 0 light
 scripts/check-fullscreen-chrome.sh 0 dark
 ```
 
 The optional display index follows `NSScreen.screens` (default `0`). Appearance
-defaults to `system`; light/dark overrides affect only the test app. Use
-`--expect-backdrop-variation` only with a nonuniform wallpaper.
+defaults to `system`; light/dark overrides affect only the test app. The backdrop
+comes from WindowServer through `NSVisualEffectView`; the app does not load a
+wallpaper image itself.
 
 The test enters a native fullscreen Space, checks header/menu-bar hover, native
 controls, live appearance changes and stable device geometry, then exits through

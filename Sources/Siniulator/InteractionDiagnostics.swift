@@ -162,6 +162,8 @@ extension Diagnostics {
             }
             let testPointScaling = controller.canSelectScalingMode(.pointAccurate)
             if testPointScaling { controller.perform(.pointAccurate) }
+            var pointAccurateOrientations = 0
+            var constrainedOrientations = 0
             for (command, turns) in [(DeviceCommand.portrait, 0), (.portraitUpsideDown, 2), (.landscapeLeft, 3), (.landscapeRight, 1)] {
                 guard let item = orientationMenu.items.first(where: { $0.tag == command.rawValue }) else {
                     throw SimulatorError(message: "Missing planar orientation menu action.")
@@ -183,11 +185,31 @@ extension Diagnostics {
                 // UIKit suppresses input during its own rotation transition.
                 // Native orientation and layout update before that transition ends.
                 try await Task.sleep(for: .milliseconds(650))
-                if testPointScaling, controller.scalingMode != .pointAccurate || !controller.isAtAccurateScale(.pointAccurate) {
-                    throw SimulatorError(message: "Point Accurate did not survive the guest orientation change.")
+                if testPointScaling {
+                    if controller.canSelectScalingMode(.pointAccurate) {
+                        // A tall phone may not fit point-accurately in portrait
+                        // on the current Mac display. If a previous orientation
+                        // correctly fell back to Fit, select Point Accurate again
+                        // before validating an orientation where it does fit.
+                        if controller.scalingMode != .pointAccurate { controller.perform(.pointAccurate) }
+                        controller.presentation.layoutSubtreeIfNeeded()
+                        guard controller.scalingMode == .pointAccurate,
+                              controller.isAtAccurateScale(.pointAccurate) else {
+                            throw SimulatorError(message: "Point Accurate was not exact after the guest orientation change.")
+                        }
+                        pointAccurateOrientations += 1
+                    } else {
+                        guard controller.scalingMode == .fitScreen,
+                              !controller.isAtAccurateScale(.pointAccurate) else {
+                            throw SimulatorError(message: "An orientation that cannot fit Point Accurate did not fall back to Fit.")
+                        }
+                        constrainedOrientations += 1
+                    }
                 }
             }
-            if testPointScaling { print("PASS: Point Accurate remains exact after all four real guest orientations") }
+            if testPointScaling {
+                print("PASS: Point Accurate remained exact in \(pointAccurateOrientations) fitting orientations; Fit handled \(constrainedOrientations) constrained orientations")
+            }
             func checkSlowAnimations() async throws {
                 guard let input = controller.screen.input,
                       let menu = NSApp.mainMenu?.items.first(where: { $0.title == "Debug" })?.submenu,

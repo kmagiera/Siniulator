@@ -9,7 +9,7 @@ final class PresentationTests: XCTestCase {
                 let device = ChromeGeometry(screenSize: CGSize(width: 440, height: 956), border: NSEdgeInsetsZero,
                     padding: NSEdgeInsetsZero, quarterTurns: turn)
                 let bounds = CGRect(origin: .zero, size: size)
-                let headerHeight = SimulatorControlBarLayout(width: size.width, titleWidth: 140, isFullScreen: false).height
+                let headerHeight = SimulatorToolbarMetrics(titleWidth: 140).layout(width: size.width).height
                 let layout = NormalPresentationLayout(bounds: bounds, headerHeight: headerHeight,
                     device: device, maximumScale: nil, showsBezels: false)
                 XCTAssertEqual(layout.canvas.minY, layout.header.maxY)
@@ -32,7 +32,7 @@ final class PresentationTests: XCTestCase {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentView = root
         let chrome = FullScreenChrome(window: window, controls: root.controls) { _ in }
-        root.controls.attachWindowButtons(window)
+        root.controls.attach(to: window)
         let originalButtons = root.controls.windowButtons
         for turn in 0..<4 {
             screen.quarterTurns = turn
@@ -73,15 +73,12 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(window.backgroundColor, .clear)
         XCTAssertNil(root.layer?.backgroundColor)
         XCTAssertFalse(root.backdrop.isHidden)
-        XCTAssertEqual(root.backdrop.blendingMode, .withinWindow)
-        XCTAssertFalse(root.wallpaper.isHidden)
+        XCTAssertEqual(root.backdrop.blendingMode, .behindWindow)
         XCTAssertEqual(root.controls.layer?.backgroundColor?.alpha, 1)
         root.isFullScreen = false
         root.refreshGeometry()
         root.layoutSubtreeIfNeeded()
-        XCTAssertTrue(root.wallpaper.isHidden)
-        XCTAssertNil(root.wallpaper.imageView.image)
-        XCTAssertNil(root.wallpaper.sourceURL)
+        XCTAssertTrue(root.backdrop.isHidden)
         XCTAssertTrue(window.isOpaque)
         XCTAssertEqual(window.backgroundColor, .black)
         withExtendedLifetime(chrome) {}
@@ -96,7 +93,7 @@ final class PresentationTests: XCTestCase {
                 padding: NSEdgeInsets(top: 10, left: 0, bottom: 0, right: 10), quarterTurns: turn)
             for size in [CGSize(width: 560, height: 900), CGSize(width: 560, height: 1400),
                          CGSize(width: 1100, height: 600), CGSize(width: 324, height: 900)] {
-                let headerHeight = SimulatorControlBarLayout(width: size.width, titleWidth: 140, isFullScreen: false).height
+                let headerHeight = SimulatorToolbarMetrics(titleWidth: 140).layout(width: size.width).height
                 let bounds = CGRect(origin: .zero, size: size)
                 let layout = NormalPresentationLayout(bounds: bounds, headerHeight: headerHeight, device: device, maximumScale: nil)
                 let fit = device.fit(in: layout.canvas)

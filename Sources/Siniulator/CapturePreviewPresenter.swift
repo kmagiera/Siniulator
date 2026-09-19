@@ -220,7 +220,7 @@ enum CapturePreviewLayout {
                 entry.deviceFrame = window.frame
                 if let root = window.contentView as? DevicePresentationView {
                     root.layoutSubtreeIfNeeded()
-                    let device = window.convertToScreen(root.convert(root.deviceRect, to: nil))
+                    let device = window.convertToScreen(root.convert(root.visualDeviceRect, to: nil))
                     let screen = root.canvas.screen
                     let display = window.convertToScreen(screen.convert(screen.bounds, to: nil))
                     let header = window.convertToScreen(root.controls.convert(root.controls.bounds, to: nil))

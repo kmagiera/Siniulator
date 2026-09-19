@@ -13,7 +13,7 @@ final class AppearanceTests: XCTestCase {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.contentView = root
         let chrome = FullScreenChrome(window: window, controls: root.controls) { _ in }
-        root.controls.attachWindowButtons(window)
+        root.controls.attach(to: window)
         root.layoutSubtreeIfNeeded()
         return (window, root, chrome)
     }
@@ -56,7 +56,7 @@ final class AppearanceTests: XCTestCase {
         withExtendedLifetime(chrome) {}
     }
 
-    @MainActor func testFullScreenKeepsOpaqueHeaderAndWallpaperBlurInBothAppearances() async throws {
+    @MainActor func testFullScreenKeepsOpaqueHeaderAndSystemBackdropInBothAppearances() async throws {
         let (window, root, chrome) = try presentation()
         root.isFullScreen = true
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua, .aqua] {
@@ -67,11 +67,10 @@ final class AppearanceTests: XCTestCase {
             XCTAssertFalse(window.isOpaque)
             XCTAssertEqual(window.backgroundColor, .clear)
             XCTAssertNil(root.layer?.backgroundColor)
-            XCTAssertFalse(root.wallpaper.isHidden)
             XCTAssertFalse(root.backdrop.isHidden)
             XCTAssertNil(root.backdrop.appearance)
             XCTAssertEqual(root.backdrop.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), dark ? .darkAqua : .aqua)
-            XCTAssertEqual(root.backdrop.blendingMode, .withinWindow)
+            XCTAssertEqual(root.backdrop.blendingMode, .behindWindow)
             XCTAssertEqual(root.controls.layer?.backgroundColor?.alpha, 1)
             XCTAssertNil(root.controls.contentView.layer?.backgroundColor)
             let background = root.controls.layer?.backgroundColor

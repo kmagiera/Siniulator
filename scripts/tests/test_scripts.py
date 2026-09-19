@@ -40,7 +40,7 @@ while [[ "$#" -gt 0 ]]; do
     fi
     shift
 done
-for name in fullscreen-chrome toolbar rotation; do echo PASS > "$output/$name-results.txt"; done
+for name in fullscreen-chrome toolbar rotation duo; do echo PASS > "$output/$name-results.txt"; done
 touch "$output/fullscreen-idle.png"
 ''')
 
@@ -66,6 +66,7 @@ touch "$output/fullscreen-idle.png"
             ("check-fullscreen-chrome.sh", "0", "dark", "extra"),
             ("check-toolbar.sh", "unexpected"),
             ("check-rotation.sh", "unexpected"),
+            ("check-duo.sh", "unexpected"),
             ("build-fixture.sh", "unexpected"),
             ("test-integration.sh",),
             ("test-integration.sh", "runtime"),
@@ -101,13 +102,21 @@ touch "$output/fullscreen-idle.png"
                 self.assertEqual("--expect-backdrop-variation" in image_check, variation)
 
     def test_toolbar_and_rotation_ignore_crash_restoration(self):
-        for script in ["check-toolbar.sh", "check-rotation.sh"]:
+        for script in ["check-toolbar.sh", "check-rotation.sh", "check-duo.sh"]:
             with self.subTest(script=script):
                 self.log.unlink(missing_ok=True)
                 result = self.run_script(script)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 launch = next(line for line in self.log.read_text().splitlines() if line.startswith("open "))
                 self.assertIn("--args -ApplePersistenceIgnoreState YES ", launch)
+
+    def test_duo_preserves_the_explicit_xcode_in_the_launched_app(self):
+        self.env["DEVELOPER_DIR"] = "/Custom Xcode.app/Contents/Developer"
+        result = self.run_script("check-duo.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = next(line for line in self.log.read_text().splitlines() if line.startswith("open "))
+        self.assertIn("--env DEVELOPER_DIR=/Custom Xcode.app/Contents/Developer", launch)
+        self.assertIn("--duo-smoke", launch)
 
     def test_fixture_targets_the_host_architecture(self):
         self.write_tool(self.bin / "codesign", ":")
