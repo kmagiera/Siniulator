@@ -25,8 +25,15 @@ trap cleanup EXIT
 xcrun simctl boot "$test_device"
 xcrun simctl bootstatus "$test_device" -b
 xcrun simctl install "$test_device" build/InteractionQA.app
-open -n -W --stdout "$output_directory/stdout.log" --stderr "$output_directory/stderr.log" \
-    build/Siniulator.app --args -ApplePersistenceIgnoreState YES --exercise "$test_device" --output-dir "$output_directory"
+open_arguments=(-n -W --stdout "$output_directory/stdout.log" --stderr "$output_directory/stderr.log")
+# LaunchServices does not reliably inherit a shell's toolchain override. Pass it
+# explicitly so an integration run against an older Xcode also loads that
+# Xcode's SimulatorKit and DeviceKit resources inside the application.
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+    open_arguments+=(--env "DEVELOPER_DIR=$DEVELOPER_DIR")
+fi
+open "${open_arguments[@]}" build/Siniulator.app \
+    --args -ApplePersistenceIgnoreState YES --exercise "$test_device" --output-dir "$output_directory"
 cat "$output_directory/stdout.log" "$output_directory/stderr.log"
 if [[ ! -f "$output_directory/exercise-success.txt" ]]; then
     echo "Integration test failed: the app exited without writing exercise-success.txt (it may have crashed)." >&2

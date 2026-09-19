@@ -3,9 +3,31 @@ import XCTest
 @testable import Siniulator
 
 final class ControlBarTests: XCTestCase {
+    func testCenteredDuoControlsReserveTitleSpaceAndUseTwoRowsBelowThatWidth() {
+        for titleWidth: CGFloat in [80, 140, 240] {
+            let selectorWidth: CGFloat = 128
+            let metrics = SimulatorToolbarMetrics(titleWidth: titleWidth, modeSize: CGSize(width: selectorWidth, height: 36))
+            let minimum = metrics.minimumExpandedWidth
+            for width in [minimum - 1, minimum, minimum + 100] {
+                let layout = metrics.layout(width: width)
+                let selector = CGRect(x: (width - selectorWidth) / 2, y: layout.buttons.minY,
+                    width: selectorWidth, height: layout.buttons.height)
+                XCTAssertEqual(layout.isCompact, width < minimum)
+                XCTAssertFalse(layout.name.intersects(selector))
+                XCTAssertFalse(layout.runtime.intersects(selector))
+                if layout.isCompact {
+                    XCTAssertLessThan(layout.name.maxY, selector.minY)
+                } else {
+                    XCTAssertGreaterThanOrEqual(layout.name.width, titleWidth)
+                    XCTAssertGreaterThanOrEqual(selector.minX - layout.name.maxX, 12)
+                }
+            }
+        }
+    }
+
     func testNarrowBarFitsCombinedTitleAboveCenteredActions() {
         for width in [CGFloat(300), 351, 380] {
-            let layout = SimulatorControlBarLayout(width: width, titleWidth: 140, isFullScreen: false)
+            let layout = SimulatorToolbarMetrics(titleWidth: 140).layout(width: width)
             let bounds = CGRect(x: 0, y: 0, width: width, height: layout.height)
             XCTAssertTrue(layout.isCompact)
             XCTAssertEqual(layout.height, 76)
@@ -20,7 +42,7 @@ final class ControlBarTests: XCTestCase {
     func testWideBarAndFullScreenKeepSingleRowWithSeparateRuntimeLabel() {
         let cases: [(CGFloat, Bool, CGFloat)] = [(388, false, 0), (760, false, 0), (300, true, 32)]
         for (width, fullScreen, inset) in cases {
-            let layout = SimulatorControlBarLayout(width: width, titleWidth: 140, isFullScreen: fullScreen, topInset: inset)
+            let layout = SimulatorToolbarMetrics(titleWidth: 140).layout(width: width, isFullScreen: fullScreen, topInset: inset)
             XCTAssertFalse(layout.isCompact)
             XCTAssertEqual(layout.height, 52)
             XCTAssertEqual(layout.cornerRadius, fullScreen ? 0 : 26)
@@ -33,7 +55,7 @@ final class ControlBarTests: XCTestCase {
     func testCornerResizeAccountsForSecondRowWithoutChangingDeviceScale() {
         let session = DeviceResizeSession(corner: .bottomRight, initialFrame: CGRect(x: 700, y: 400, width: 464, height: 1028),
             initialPointer: .zero, deviceSize: CGSize(width: 440, height: 940), initialScale: 1,
-            visibleFrame: CGRect(x: 0, y: 0, width: 3008, height: 1662), minimumSize: CGSize(width: 324, height: 360), titleWidth: 140)
+            visibleFrame: CGRect(x: 0, y: 0, width: 3008, height: 1662), minimumSize: CGSize(width: 324, height: 360), toolbarMetrics: SimulatorToolbarMetrics(titleWidth: 140))
         let resized = session.geometry(at: CGPoint(x: -110, y: 235))
         XCTAssertEqual(resized.scale, 0.75)
         XCTAssertEqual(resized.frame.width, 354)
@@ -41,9 +63,9 @@ final class ControlBarTests: XCTestCase {
         XCTAssertEqual(resized.frame.maxY, 1428)
     }
     func testFullScreenRevealSlidesTitleWithoutMovingActionsOrDeviceHeader() {
-        let idle = SimulatorControlBarLayout(width: 756, titleWidth: 140, isFullScreen: true)
+        let idle = SimulatorToolbarMetrics(titleWidth: 140).layout(width: 756, isFullScreen: true)
         for progress in [CGFloat(0), 0.25, 0.5, 0.75, 1] {
-            let layout = SimulatorControlBarLayout(width: 756, titleWidth: 140, isFullScreen: true, fullScreenRevealProgress: progress)
+            let layout = SimulatorToolbarMetrics(titleWidth: 140).layout(width: 756, isFullScreen: true, revealProgress: progress)
             XCTAssertEqual(layout.name.minX, 20 + 88 * progress)
             XCTAssertEqual(layout.runtime.minX, layout.name.minX)
             XCTAssertEqual(layout.name.maxX, idle.name.maxX)
@@ -57,7 +79,7 @@ final class ControlBarTests: XCTestCase {
         let frame = CGRect(x: 500, y: 0, width: 440 * scale + 24, height: 1662)
         let session = DeviceResizeSession(corner: .bottomRight, initialFrame: frame, initialPointer: .zero,
             deviceSize: CGSize(width: 440, height: 940), initialScale: scale,
-            visibleFrame: CGRect(x: 0, y: 0, width: 3008, height: 1662), minimumSize: CGSize(width: 324, height: 360), titleWidth: 140)
+            visibleFrame: CGRect(x: 0, y: 0, width: 3008, height: 1662), minimumSize: CGSize(width: 324, height: 360), toolbarMetrics: SimulatorToolbarMetrics(titleWidth: 140))
         let unchanged = session.frame(at: .zero)
         XCTAssertEqual(unchanged.width, frame.width, accuracy: 0.001)
         XCTAssertEqual(unchanged.height, frame.height, accuracy: 0.001)

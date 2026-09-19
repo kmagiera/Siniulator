@@ -3,6 +3,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Returns an empty list on timeout. Late completions must not race the reader.
+FOUNDATION_EXPORT NSArray *SIEnumerateScreens(id adapter, NSTimeInterval timeout);
+
 // Only the dynamic private-API and NSException boundary lives in Objective-C.
 // No private framework is linked at build time.
 @interface SICoreSimulator : NSObject
@@ -27,6 +30,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface SIDisplay : NSObject
 @property (nullable, readonly) id surface;
 - (nullable instancetype)initWithDevice:(id)device error:(NSError **)error;
+- (nullable instancetype)initWithDevice:(id)device screenID:(uint32_t)screenID width:(uint32_t)width height:(uint32_t)height error:(NSError **)error;
 // Frame delivery occurs on the display queue, not the caller's actor.
 - (BOOL)startWithFrameHandler:(void (NS_SWIFT_SENDABLE ^)(void))handler error:(NSError **)error;
 - (void)stop;

@@ -10,8 +10,10 @@ enum DeviceResizeCorner: CaseIterable {
         let vertex = CGPoint(x: isLeft ? device.minX : device.maxX, y: isTop ? device.minY : device.maxY)
         let offset = min(radius, device.width / 2, device.height / 2) * (1 - 1 / sqrt(2))
         let curve = CGPoint(x: vertex.x + (isLeft ? offset : -offset), y: vertex.y + (isTop ? offset : -offset))
-        return CGRect(x: vertex.x - 14, y: vertex.y - 14, width: 28, height: 28)
-            .union(CGRect(x: curve.x - 14, y: curve.y - 14, width: 28, height: 28))
+        // The rectangular vertex is transparent for a rounded device. Keeping
+        // it in the resize target made the cursor appear beyond the visible
+        // hardware, especially while a foldable was projected into depth.
+        return CGRect(x: curve.x - 14, y: curve.y - 14, width: 28, height: 28)
     }
     @MainActor var cursor: NSCursor {
         if #available(macOS 15, *) {
@@ -39,15 +41,22 @@ struct DeviceResizeSession {
     let initialScale: CGFloat
     let visibleFrame: CGRect
     let minimumSize: CGSize
-    var titleWidth: CGFloat? = nil
+    var toolbarMetrics: SimulatorToolbarMetrics? = nil
 
     func frame(at pointer: CGPoint) -> CGRect { geometry(at: pointer).frame }
     func geometry(at pointer: CGPoint) -> (frame: CGRect, scale: CGFloat) {
-        // Below the toolbar's minimum width, unused horizontal space is not
-        // bezel padding. Repeated resize gestures must retain the fixed margin.
-        let extraWidth = NormalPresentationLayout.deviceSideMargin * 2
+        // A foldable keeps its window frame while switching between displays,
+        // so the current pose can start with real horizontal slack around its
+        // canvas. Preserve that slack at pointer zero to avoid a jump. Do not
+        // mistake space caused only by the toolbar minimum for permanent bezel
+        // padding; it must disappear again as a small phone is enlarged.
+        let normalExtraWidth = NormalPresentationLayout.deviceSideMargin * 2
+        let ordinaryInitialWidth = max(minimumSize.width, deviceSize.width * initialScale + normalExtraWidth)
+        let extraWidth = abs(initialFrame.width - ordinaryInitialWidth) <= 1
+            ? normalExtraWidth
+            : max(normalExtraWidth, initialFrame.width - deviceSize.width * initialScale)
         func barHeight(for width: CGFloat) -> CGFloat {
-            titleWidth.map { SimulatorControlBarLayout(width: width, titleWidth: $0, isFullScreen: false).height } ?? SimulatorControlBarLayout.expandedHeight
+            toolbarMetrics?.layout(width: width).height ?? SimulatorControlBarLayout.expandedHeight
         }
         let extraHeight = initialFrame.height - deviceSize.height * initialScale - barHeight(for: initialFrame.width)
         let dx = (pointer.x - initialPointer.x) * (corner.isLeft ? -1 : 1)
@@ -80,6 +89,54 @@ struct DeviceResizeSession {
     private var resizeSession: DeviceResizeSession?
     var isCornerResizing: Bool { resizeSession != nil }
     var onManualResize: (() -> Void)?
+    private var localPointerMonitor: Any?
+    private var globalPointerMonitor: Any?
+    private var trackingMagnification = false
+
+    /// WindowServer otherwise treats the entire SceneKit backing surface as a
+    /// mouse target, including its transparent, unfolded-size margins. A nil
+    /// NSView hit test cannot hand the click to a different application.
+    func updateMousePassthrough() {
+        guard !styleMask.contains(.fullScreen),
+              let root = contentView as? DevicePresentationView, root.hasTransparentDuoMargins else {
+            stopPointerMonitoring()
+            return
+        }
+        if localPointerMonitor == nil {
+            let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseUp, .rightMouseUp, .otherMouseUp]
+            localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+                self?.updateMousePassthrough()
+                return event
+            }
+            // Necessary to re-enable this window when the pointer returns from
+            // another app while ignoresMouseEvents is true. No event replay.
+            globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+                self?.updateMousePassthrough()
+            }
+        }
+        updateMousePassthrough(at: NSEvent.mouseLocation, buttonsPressed: NSEvent.pressedMouseButtons != 0)
+    }
+
+    func updateMousePassthrough(at screenPoint: CGPoint, buttonsPressed: Bool) {
+        guard !styleMask.contains(.fullScreen),
+              let root = contentView as? DevicePresentationView, root.hasTransparentDuoMargins else {
+            ignoresMouseEvents = false
+            return
+        }
+        // Preserve the owner of an in-flight drag, even beyond the mesh. This
+        // applies both to simulator input/resizing and a drag in the app below.
+        guard !buttonsPressed, !isCornerResizing, !trackingMagnification else { return }
+        let local = root.convert(convertPoint(fromScreen: screenPoint), from: nil)
+        ignoresMouseEvents = !root.acceptsMouse(at: local)
+    }
+
+    private func stopPointerMonitoring() {
+        if let localPointerMonitor { NSEvent.removeMonitor(localPointerMonitor) }
+        if let globalPointerMonitor { NSEvent.removeMonitor(globalPointerMonitor) }
+        localPointerMonitor = nil
+        globalPointerMonitor = nil
+        ignoresMouseEvents = false
+    }
 
     func updatePresentationBackground() {
         // AppKit rebuilds window chrome during native full-screen transitions.
@@ -102,6 +159,25 @@ struct DeviceResizeSession {
     }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .magnify {
+            if event.phase == .began { trackingMagnification = true }
+            if event.phase == .ended || event.phase == .cancelled { trackingMagnification = false }
+        }
+        defer {
+            if [.leftMouseUp, .rightMouseUp, .otherMouseUp, .magnify].contains(event.type) {
+                updateMousePassthrough()
+            }
+        }
+        if event.type == .leftMouseDown,
+           let bar = (contentView as? DevicePresentationView)?.controls, !bar.isFullScreen,
+           let control = bar.displayModeControl,
+           !control.isHidden, control.bounds.contains(control.convert(event.locationInWindow, from: nil)) {
+            // The transparent native titlebar sits above the persistent custom
+            // bar. Route clicks in the centered Duo control to the real AppKit
+            // segmented control instead of letting the titlebar start a drag.
+            control.mouseDown(with: event)
+            return
+        }
         if let session = resizeSession {
             if event.type == .leftMouseDragged {
                 onManualResize?()
@@ -126,7 +202,7 @@ struct DeviceResizeSession {
                 resizeSession = DeviceResizeSession(corner: corner, initialFrame: frame,
                     initialPointer: pointer,
                     deviceSize: root.canvas.geometry.size, initialScale: root.canvas.geometry.fit(in: root.canvas.bounds, maximumScale: root.canvas.maximumScale).scale,
-                    visibleFrame: visible, minimumSize: minSize, titleWidth: root.controls.titleWidth)
+                    visibleFrame: visible, minimumSize: minSize, toolbarMetrics: root.controls.metrics)
                 makeKey()
                 disableCursorRects()
                 corner.cursor.push()
@@ -145,5 +221,5 @@ struct DeviceResizeSession {
         enableCursorRects()
         if let contentView { invalidateCursorRects(for: contentView) }
     }
-    override func close() { endCornerResize(); super.close() }
+    override func close() { endCornerResize(); stopPointerMonitoring(); super.close() }
 }

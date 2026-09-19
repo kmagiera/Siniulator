@@ -11,11 +11,9 @@ import AVFoundation
     private(set) var hasStarted = false
     private(set) var isStopping = false
 
-    init(deviceID: String, outputURL: URL) throws {
-        let process = Process()
+    init(deviceID: String, displayID: UInt32? = nil, outputURL: URL) throws {
+        let process = Self.makeProcess(deviceID: deviceID, displayID: displayID, outputURL: outputURL)
         self.process = process
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["simctl", "io", deviceID, "recordVideo", "--codec=h264", "--mask=ignored", "--force", outputURL.path]
         let pipe = Pipe()
         process.standardError = pipe
         process.standardOutput = FileHandle.nullDevice
@@ -49,6 +47,17 @@ import AVFoundation
                 }
             }
         }
+    }
+
+    static func makeProcess(deviceID: String, displayID: UInt32? = nil, outputURL: URL) -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.environment = DeveloperDirectory.environment()
+        var arguments = ["simctl", "io", deviceID, "recordVideo"]
+        if let displayID { arguments.append("--display=\(displayID)") }
+        arguments += ["--codec=h264", "--mask=ignored", "--force", outputURL.path]
+        process.arguments = arguments
+        return process
     }
 
     func stop() {

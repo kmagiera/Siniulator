@@ -24,7 +24,7 @@ if rg -n 'Siniulator\.(Diagnostics|PerformanceDiagnostics|Benchmark[A-Za-z]+|Sim
     exit 1
 fi
 strings "$release_binary_directory/Siniulator" > "$verification_directory/release-strings.txt"
-if rg -n -- '--(probe|exercise|smoke|presentation-smoke|window-controls-smoke|fullscreen-chrome-smoke|toolbar-smoke|rotation-smoke|recording-smoke|startup-smoke|test-appearance|open-all|benchmark)([[:space:]]|$)' "$verification_directory/release-strings.txt"; then
+if rg -n -- '--(probe|exercise|smoke|presentation-smoke|window-controls-smoke|fullscreen-chrome-smoke|toolbar-smoke|rotation-smoke|duo-smoke|recording-smoke|startup-smoke|test-appearance|open-all|benchmark)([[:space:]]|$)' "$verification_directory/release-strings.txt"; then
     echo "FAIL: a diagnostic launch flag is present in the normal Release binary" >&2
     exit 1
 fi

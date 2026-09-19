@@ -101,8 +101,7 @@ extension Diagnostics {
                 guard !window.isOpaque, window.backgroundColor == .clear,
                       root.layer?.backgroundColor == nil || root.layer?.backgroundColor?.alpha == 0,
                       bar.layer?.backgroundColor?.alpha == 1,
-                      !root.backdrop.isHidden, root.backdrop.blendingMode == .withinWindow,
-                      !root.wallpaper.isHidden, root.wallpaper.imageView.image != nil else {
+                      !root.backdrop.isHidden, root.backdrop.blendingMode == .behindWindow else {
                     throw SimulatorError(message: "Full-screen window lost desktop transparency or its header became translucent: \(name).")
                 }
                 guard buttons.count == 3,
@@ -217,7 +216,7 @@ extension Diagnostics {
             }
             window.setFrame(savedFrame, display: true, animate: false)
             try Data("done".utf8).write(to: directory.appendingPathComponent("phase.txt"), options: .atomic)
-            let result = "PASS: native full-screen Space; device-header hover does not reveal chrome; system menu-bar edge reveals menu, status bar and original window controls; native reveal/retreat with animated title inset; persistent native toolbar actions remain clickable; live appearance changes reach the auxiliary toolbar window; stable device canvas; configured wallpaper with native within-window blur; exit by clicking native green; normal-window controls and dimensions restored.\n"
+            let result = "PASS: native full-screen Space; device-header hover does not reveal chrome; system menu-bar edge reveals menu, status bar and original window controls; native reveal/retreat with animated title inset; persistent native toolbar actions remain clickable; live appearance changes reach the auxiliary toolbar window; stable device canvas; permission-free native behind-window composition; exit by clicking native green; normal-window controls and dimensions restored.\n"
             try Data(result.utf8).write(to: directory.appendingPathComponent("fullscreen-chrome-results.txt"))
             print(result)
         } catch {

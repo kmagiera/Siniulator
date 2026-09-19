@@ -2,6 +2,51 @@ import Foundation
 import Combine
 import SimulatorBridge
 
+struct XcodeInstallation: Equatable {
+    let developerDirectory: String
+    let version: String
+
+    static func preferred(override: String?, selected: String, installed: [XcodeInstallation]) -> String {
+        if let override, !override.isEmpty { return normalize(override) }
+        let selected = normalize(selected)
+        return installed.max {
+            let order = $0.version.compare($1.version, options: .numeric)
+            if order != .orderedSame { return order == .orderedAscending }
+            if $0.developerDirectory == selected { return false }
+            if $1.developerDirectory == selected { return true }
+            return $0.developerDirectory < $1.developerDirectory
+        }?.developerDirectory ?? selected
+    }
+
+    static func normalize(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        return url.pathExtension == "app" ? url.appendingPathComponent("Contents/Developer").path : url.path
+    }
+}
+
+enum DeveloperDirectory {
+    static func environment(_ inherited: [String: String] = ProcessInfo.processInfo.environment,
+                            developerDirectory: String = preferred) -> [String: String] {
+        var environment = inherited
+        environment["DEVELOPER_DIR"] = developerDirectory
+        return environment
+    }
+    static let preferred: String = {
+        let environment = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
+        let selected = (try? FileManager.default.destinationOfSymbolicLink(atPath: "/var/db/xcode_select_link"))
+            ?? "/Applications/Xcode.app/Contents/Developer"
+        let applications = (try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: "/Applications"),
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let installed = applications.compactMap { url -> XcodeInstallation? in
+            guard url.pathExtension == "app", let bundle = Bundle(url: url),
+                  bundle.bundleIdentifier == "com.apple.dt.Xcode",
+                  let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return nil }
+            return XcodeInstallation(developerDirectory: url.appendingPathComponent("Contents/Developer").path, version: version)
+        }
+        return XcodeInstallation.preferred(override: environment, selected: selected, installed: installed)
+    }()
+}
+
 struct SimulatorDevice: Decodable, Identifiable, Hashable, Sendable {
     let udid: String
     let name: String
@@ -49,6 +94,9 @@ enum CommandRunner {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
+                if executable == "/usr/bin/xcrun" {
+                    process.environment = DeveloperDirectory.environment()
+                }
                 let output = Pipe(), errors = Pipe()
                 process.standardOutput = output
                 process.standardError = errors
@@ -298,11 +346,27 @@ extension SIDeviceMonitor: DeviceMonitoring {}
     }
 }
 
+/// Keep an asynchronously opened framebuffer inseparable from its requested
+/// panel metadata, even if the visible pose changes while opening it.
+@MainActor struct SimulatorPanelConnection {
+    let core: SICoreSimulator
+    let device: Any
+    let display: SIDisplay
+    let chrome: DeviceChrome
+
+    static func connect(_ udid: String, chrome: DeviceChrome,
+                        open: @MainActor (String, UInt32, UInt32, UInt32) async throws -> (SICoreSimulator, Any, SIDisplay)
+                            = { try await CoreSimulatorConnection.connect($0, screenID: $1, width: $2, height: $3) })
+        async throws -> Self {
+        let (core, device, display) = try await open(udid, chrome.screenID, chrome.pixelWidth, chrome.pixelHeight)
+        return Self(core: core, device: device, display: display, chrome: chrome)
+    }
+}
+
 enum CoreSimulatorConnection {
     static func monitor(changeHandler: @escaping @Sendable () -> Void,
                         invalidationHandler: @escaping @Sendable (String) -> Void) async throws -> DeviceMonitoring {
-        let directoryData = try await CommandRunner.run("/usr/bin/xcode-select", ["-p"])
-        let directory = String(decoding: directoryData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let directory = DeveloperDirectory.preferred
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
@@ -314,15 +378,15 @@ enum CoreSimulatorConnection {
         }
     }
 
-    static func connect(_ udid: String) async throws -> (SICoreSimulator, Any, SIDisplay) {
-        let directoryData = try await CommandRunner.run("/usr/bin/xcode-select", ["-p"])
-        let directory = String(decoding: directoryData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    static func connect(_ udid: String, screenID: UInt32 = 0, width: UInt32 = 0,
+                        height: UInt32 = 0) async throws -> (SICoreSimulator, Any, SIDisplay) {
+        let directory = DeveloperDirectory.preferred
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let core = try SICoreSimulator(developerDirectory: directory)
                     let device = try core.device(withUDID: udid)
-                    let display = try SIDisplay(device: device)
+                    let display = try SIDisplay(device: device, screenID: screenID, width: width, height: height)
                     continuation.resume(returning: (core, device, display))
                 } catch { continuation.resume(throwing: error) }
             }

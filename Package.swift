@@ -13,6 +13,7 @@ let package = Package(
                 linkerSettings: [.linkedFramework("Foundation"), .linkedFramework("IOSurface")]),
         .executableTarget(name: "Siniulator", dependencies: ["SimulatorBridge", .product(name: "Sparkle", package: "Sparkle")],
                           linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("MetalKit"), .linkedFramework("CoreImage"),
+                                           .linkedFramework("SceneKit"),
                                            .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
         .testTarget(name: "SiniulatorTests", dependencies: ["Siniulator"])
     ],

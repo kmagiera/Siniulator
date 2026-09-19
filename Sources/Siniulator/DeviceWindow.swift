@@ -12,6 +12,7 @@ enum DeviceCommand: Int {
     case pointAccurate, pixelAccurate, showBezels
     case hardwareKeyboard
     case physicalSize
+    case coverScreen, innerPartiallyOpen, innerFullyOpen
 }
 
 @MainActor final class DeviceWindowController: NSWindowController, NSWindowDelegate {
@@ -20,8 +21,10 @@ enum DeviceCommand: Int {
     private let store: DeviceStore
     private let settings: AppSettings
     private let capturePreviews: CapturePreviewPresenter
+    private let displayModes: [DeviceDisplayMode]
     private var display: SIDisplay?
     private var input: SimulatorInput?
+    private(set) var displayMode: DeviceDisplayMode?
     private(set) var presentation: DevicePresentationView!
     private(set) var hasEnteredFullScreen = false
     private(set) var staysOnTop = false
@@ -38,6 +41,15 @@ enum DeviceCommand: Int {
     private var connectTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
     private var connectVersion = 0
+    private var displaySwitchTask: Task<Void, Never>?
+    private var displaySwitchVersion = 0
+    private var hingeAnimationTask: Task<Void, Never>?
+    private var hingeAnimationVersion = 0
+    private var hingeFeedback = DuoHingeFeedback()
+    private var currentHingeAngle: Double
+    private var connectedScreenID: UInt32?
+    private var duoDisplays: [UInt32: SIDisplay] = [:]
+    private var displayWarmupTask: Task<Void, Never>?
     private var deviceObservation: AnyCancellable?
     private var hasObservedBooted = false
     private var closed = false
@@ -52,6 +64,18 @@ enum DeviceCommand: Int {
     var isRecording: Bool { recording != nil }
     var isStoppingRecording: Bool { recording?.isStopping == true }
     var recordingHasStarted: Bool { recording?.hasStarted == true }
+#if DEBUG
+    var diagnosticConnectedScreenID: UInt32? { connectedScreenID }
+    var diagnosticDisplaySwitchInProgress: Bool { displaySwitchTask != nil }
+    var diagnosticHingeAngle: Double { currentHingeAngle }
+    var diagnosticHingeAnimationInProgress: Bool { hingeAnimationTask != nil }
+    var diagnosticShowsConnectionOverlay: Bool { !overlay.isHidden }
+    var diagnosticConnectionMessage: String { message.stringValue }
+    var diagnosticReadyPanelIDs: [UInt32] {
+        duoDisplays.compactMap { $0.value.surface == nil ? nil : $0.key }.sorted()
+    }
+    func diagnosticSetHingeAngle(_ angle: Double) { setInteractiveHingeAngle(angle) }
+#endif
     var slowAnimationsEnabled: Bool? {
         guard connected, let input else { return nil }
         return try? input.slowAnimationsEnabled()
@@ -60,12 +84,26 @@ enum DeviceCommand: Int {
     init(device: SimulatorDevice, store: DeviceStore, capturePreviews: CapturePreviewPresenter,
          settings: AppSettings = .shared) throws {
         self.deviceInfo = device
+        let displayModes = DeviceChrome.displayModes(for: device)
+        self.displayModes = displayModes
+        let savedDisplayMode = (UserDefaults.standard.object(forKey: "display-mode-\(device.id)") as? NSNumber)
+            .flatMap { DeviceDisplayMode(rawValue: $0.intValue) }
+        let fallbackMode = savedDisplayMode.flatMap { displayModes.contains($0) ? $0 : nil } ?? displayModes.last
+        let savedHingeAngle = (UserDefaults.standard.object(forKey: "hinge-angle-\(device.id)") as? NSNumber)?.doubleValue
+        let hingeAngle = min(180, max(0, savedHingeAngle ?? fallbackMode?.hingeAngle ?? 180))
+        self.displayMode = displayModes.isEmpty ? nil : DeviceDisplayMode.mode(forHingeAngle: hingeAngle)
+        self.currentHingeAngle = hingeAngle
         self.hardwareKeyboardEnabled = UserDefaults.standard.object(forKey: "hardware-keyboard-\(device.id)") as? Bool ?? true
         self.store = store
         self.settings = settings
         self.capturePreviews = capturePreviews
         self.hasObservedBooted = device.isBooted
-        self.screen = SimulatorScreenView(renderer: try ScreenRenderer())
+        let screen = SimulatorScreenView(renderer: try ScreenRenderer())
+        if !displayModes.isEmpty {
+            screen.quarterTurns = ScreenGeometry.normalizedQuarterTurns(
+                UserDefaults.standard.integer(forKey: "orientation-\(device.id)"))
+        }
+        self.screen = screen
         let available = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1512, height: 950)
         let window = DeviceHostWindow(contentRect: NSRect(x: 0, y: 0, width: device.name.contains("iPad") ? 560 : 440, height: min(900, available.height - 40)),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -87,20 +125,28 @@ enum DeviceCommand: Int {
         super.init(window: window)
         window.delegate = self
         window.setFrameAutosaveName("framed-device-\(device.id)")
+        let root = DevicePresentationView(screen: screen, chrome: DeviceChrome.load(for: device, displayMode: displayMode), device: device) { [weak self] in self?.perform($0) }
+        presentation = root
+        window.minSize.width = root.controls.minimumCompactWidth + NormalPresentationLayout.deviceSideMargin * 2
         if window.frame.width < window.minSize.width {
             var frame = window.frame
             frame.size.width = window.minSize.width
             window.setFrame(frame, display: false, animate: false)
         }
-        let root = DevicePresentationView(screen: screen, chrome: DeviceChrome.load(for: device), device: device) { [weak self] in self?.perform($0) }
-        presentation = root
+        root.controls.update(hingeAngle: currentHingeAngle)
+        root.canvas.setHingeAngle(CGFloat(currentHingeAngle))
+        if !displayModes.isEmpty {
+            screen.magnifyHandler = { [weak self] event in
+                self?.handleDuoMagnify(event) ?? false
+            }
+        }
         root.canvas.showsBezels = UserDefaults.standard.object(forKey: "show-bezels-\(device.id)") as? Bool ?? true
         window.contentView = root
-        root.controls.attachWindowButtons(window)
         fullScreenChrome = FullScreenChrome(window: window, controls: root.controls) { [weak self] progress in
             guard let self, self.hasEnteredFullScreen, self.presentation.isFullScreen, !self.closed else { return }
             self.presentation.controls.setFullScreenRevealProgress(progress)
         }
+        root.controls.attach(to: window)
         window.onManualResize = { [weak self] in
             self?.scalingMode = .custom
             self?.presentation.canvas.pixelAligned = false
@@ -163,9 +209,15 @@ enum DeviceCommand: Int {
 
     func connect() {
         guard !closed, !isClosing else { return }
+        displaySwitchTask?.cancel()
+        displaySwitchVersion += 1
         connectTask?.cancel()
         connectVersion += 1
         let version = connectVersion
+        // A foldable changes the framebuffer, not the CoreDevice HID session.
+        // Reusing the live input connections avoids racing XPC cancellation
+        // against a second digitizer activation while changing panels.
+        let reusableInput = input
         disconnect(message: "Starting \(deviceInfo.name)…", canRetry: false)
         spinner.isHidden = false
         spinner.startAnimation(nil)
@@ -176,20 +228,48 @@ enum DeviceCommand: Int {
                 try Task.checkCancellation()
                 try await store.boot(deviceInfo)
                 try Task.checkCancellation()
-                var connection: (SICoreSimulator, Any, SIDisplay)?
+                // The UI can change pose while boot/display/HID activation is
+                // suspended. Never label the returned framebuffer with a later
+                // request's metadata; reconcile the current request at commit.
+                let requestedChrome = presentation.canvas.chrome
+                var connection: SimulatorPanelConnection?
                 var lastError: Error?
-                for _ in 0..<20 {
-                    do { connection = try await CoreSimulatorConnection.connect(deviceInfo.id); break }
+                // A foldable can take longer than ten seconds to publish the
+                // newly active panel after a hinge transition. Successful
+                // connections still return immediately.
+                for _ in 0..<60 {
+                    do { connection = try await SimulatorPanelConnection.connect(deviceInfo.id,
+                        chrome: requestedChrome); break }
                     catch { lastError = error; try await Task.sleep(for: .milliseconds(500)) }
                 }
                 try Task.checkCancellation()
                 guard !closed else { return }
-                guard let (core, device, display) = connection else { throw lastError ?? SimulatorError(message: "Display unavailable.") }
-                let input = try SimulatorInput(core: core, device: device)
-                try await input.activate()
+                guard let connection else { throw lastError ?? SimulatorError(message: "Display unavailable.") }
+                let core = connection.core, device = connection.device, display = connection.display
+                let connectionChrome = connection.chrome
+                let input: SimulatorInput
+                if let reusableInput {
+                    input = reusableInput
+                    input.setDigitizerTarget(connectionChrome.digitizerTarget)
+                } else {
+                    input = try SimulatorInput(core: core, device: device,
+                                               digitizerTarget: connectionChrome.digitizerTarget)
+                    try await input.activate()
+                }
+                if !displayModes.isEmpty, input.setHingeAngle(currentHingeAngle) {
+                    try await Task.sleep(for: .milliseconds(350))
+                }
+                if !displayModes.isEmpty {
+                    guard input.setFoldableOrientation(quarterTurns: screen.quarterTurns) else {
+                        throw SimulatorError(message: "The Duo orientation control is unavailable.")
+                    }
+                    try await Task.sleep(for: .milliseconds(350))
+                }
                 try input.setHardwareKeyboardEnabled(hardwareKeyboardEnabled)
                 let previousOrientation = screen.quarterTurns
-                screen.quarterTurns = (try? await input.orientationTurns(udid: deviceInfo.id)) ?? 0
+                if displayModes.isEmpty {
+                    screen.quarterTurns = (try? await input.orientationTurns(udid: deviceInfo.id)) ?? 0
+                }
                 if screen.quarterTurns != previousOrientation {
                     presentation.refreshGeometry()
                     if scalingMode.isAccurate { reapplyScalingMode() }
@@ -198,13 +278,24 @@ enum DeviceCommand: Int {
                 try Task.checkCancellation()
                 input.onError = { [weak self] error in self?.disconnect(message: error.localizedDescription) }
                 self.display = display
+                self.connectedScreenID = connectionChrome.screenID
                 self.input = input
-                screen.display = display
+                screen.setDisplay(display, chrome: connectionChrome)
                 screen.input = input
-                let renderer = screen.renderer
-                try display.start { [weak renderer] in renderer?.requestFrame() }
+                if displayModes.isEmpty {
+                    try display.start(frameHandler: screen.frameHandler(observesSurfaceChanges: false))
+                } else {
+                    try observeDuoDisplay(display, chrome: connectionChrome)
+                    warmDuoDisplays()
+                }
                 screen.needsDisplay = true
                 connected = true
+                if !displayModes.isEmpty {
+                    // Changes made while input was still local to this task
+                    // must reach the guest before the final panel selection.
+                    _ = input.setHingeAngle(currentHingeAngle)
+                    synchronizeDisplay()
+                }
                 overlay.isHidden = true
                 spinner.stopAnimation(nil)
                 updateStatus()
@@ -214,9 +305,16 @@ enum DeviceCommand: Int {
         }
     }
     private func disconnect(message: String, canRetry: Bool = true) {
+        displaySwitchTask?.cancel()
+        displaySwitchTask = nil
+        displaySwitchVersion += 1
+        hingeAnimationTask?.cancel()
+        hingeAnimationTask = nil
+        hingeAnimationVersion += 1
         screen.releaseKeys()
-        display?.stop()
+        stopDisplays()
         display = nil; input = nil
+        connectedScreenID = nil
         screen.display = nil; screen.input = nil
         connected = false
         overlay.isHidden = false
@@ -237,6 +335,9 @@ enum DeviceCommand: Int {
         case .pixelAccurate: selectScalingMode(.pixelAccurate); return
         case .fit: selectScalingMode(.fitScreen); return
         case .showBezels: toggleBezels(); return
+        case .coverScreen: selectDisplayMode(.cover); return
+        case .innerPartiallyOpen: selectDisplayMode(.innerPartiallyOpen); return
+        case .innerFullyOpen: selectDisplayMode(.innerFullyOpen); return
         default: break
         }
         if command == .stopRecording { if isRecording { stopRecording() }; return }
@@ -274,7 +375,8 @@ enum DeviceCommand: Int {
                     UserDefaults.standard.set(enabled, forKey: "hardware-keyboard-\(deviceInfo.id)")
                 }
             } catch { report(error) }
-        case .fit, .physicalSize, .pointAccurate, .pixelAccurate, .showBezels: break
+        case .fit, .physicalSize, .pointAccurate, .pixelAccurate, .showBezels,
+             .coverScreen, .innerPartiallyOpen, .innerFullyOpen: break
         case .appearance:
             dark.toggle()
             run(["ui", deviceInfo.id, "appearance", dark ? "dark" : "light"])
@@ -282,12 +384,213 @@ enum DeviceCommand: Int {
         case .stopRecording: break
         }
     }
+    private func selectDisplayMode(_ mode: DeviceDisplayMode) {
+        guard displayModes.contains(mode) else { return }
+        screen.releaseKeys()
+        UserDefaults.standard.set(mode.rawValue, forKey: "display-mode-\(deviceInfo.id)")
+        UserDefaults.standard.set(mode.hingeAngle, forKey: "hinge-angle-\(deviceInfo.id)")
+        animateHinge(to: mode.hingeAngle)
+        window?.makeFirstResponder(screen)
+    }
+
+    private func handleDuoMagnify(_ event: NSEvent) -> Bool {
+        guard !displayModes.isEmpty else { return false }
+        if event.phase == .began {
+            hingeAnimationTask?.cancel()
+            hingeAnimationTask = nil
+            hingeAnimationVersion += 1
+            screen.releaseKeys()
+        }
+        let delta = Double(event.magnification) * 180
+        let previousAngle = currentHingeAngle
+        if abs(delta) > 0.0001 {
+            setInteractiveHingeAngle(currentHingeAngle + delta)
+        }
+        if hingeFeedback.update(from: previousAngle, to: currentHingeAngle, phase: event.phase) {
+            // Ask for the current performer each time: AppKit handles hardware
+            // support and user preferences. Preset animations never use this path.
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .drawCompleted)
+        }
+        if event.phase == .ended || event.phase == .cancelled {
+            UserDefaults.standard.set(currentHingeAngle, forKey: "hinge-angle-\(deviceInfo.id)")
+            if let displayMode {
+                UserDefaults.standard.set(displayMode.rawValue, forKey: "display-mode-\(deviceInfo.id)")
+            }
+            window?.makeFirstResponder(screen)
+        }
+        return true
+    }
+
+    private func setInteractiveHingeAngle(_ proposedAngle: Double) {
+        let angle = min(180, max(0, proposedAngle))
+        guard angle != currentHingeAngle else { return }
+        currentHingeAngle = angle
+        _ = input?.setHingeAngle(angle)
+
+        let nextMode = DeviceDisplayMode.mode(forHingeAngle: angle)
+        if nextMode != displayMode {
+            screen.releaseKeys()
+            displayMode = nextMode
+            let chrome = DeviceChrome.load(for: deviceInfo, displayMode: nextMode)
+            presentation.canvas.setChrome(chrome)
+            presentation.canvas.maximumScale = scalingMode.isAccurate ? logicalScale(for: scalingMode) : nil
+            synchronizeDisplay()
+        }
+        presentation.canvas.setHingeAngle(CGFloat(angle))
+        presentation.controls.update(hingeAngle: angle)
+        presentation.refreshGeometry()
+    }
+    private func synchronizeDisplay() {
+        displaySwitchTask?.cancel()
+        displaySwitchVersion += 1
+        // Startup owns the connection until it publishes its immutable panel.
+        guard connected, let mode = displayMode else { return }
+        let chrome = presentation.canvas.chrome
+        screen.releaseKeys()
+        if connectedScreenID == chrome.screenID {
+            screen.input = input
+        } else {
+            // Do not send coordinates from the new pose to the old digitizer.
+            screen.input = nil
+            switchDisplay(to: chrome, mode: mode, version: displaySwitchVersion)
+        }
+    }
+    private func animateHinge(to target: Double) {
+        hingeAnimationTask?.cancel()
+        hingeAnimationTask = nil
+        hingeAnimationVersion += 1
+        let version = hingeAnimationVersion
+        // Undo the segmented control's immediate target selection. Selection
+        // follows the current pose, including clicks on the selected middle item.
+        presentation.controls.update(hingeAngle: currentHingeAngle)
+        let animation = DuoHingeAnimation(start: currentHingeAngle, target: target)
+        guard abs(target - currentHingeAngle) > 0.1,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            setInteractiveHingeAngle(target)
+            return
+        }
+        hingeAnimationTask = Task { [weak self] in
+            guard let self else { return }
+            let started = CACurrentMediaTime()
+            while true {
+                do { try Task.checkCancellation() }
+                catch { return }
+                let linear = min(1, max(0, (CACurrentMediaTime() - started) / animation.duration))
+                // One clock drives HID, model, active panel and toolbar. A
+                // pinch or another preset resumes from this exact visible pose.
+                setInteractiveHingeAngle(animation.angle(at: linear))
+                if linear >= 1 { break }
+                do { try await Task.sleep(for: .milliseconds(16)) }
+                catch { return }
+            }
+            if hingeAnimationVersion == version { hingeAnimationTask = nil }
+        }
+    }
+    private func switchDisplay(to chrome: DeviceChrome, mode: DeviceDisplayMode, version: Int) {
+        displaySwitchTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.displaySwitchVersion == version { self.displaySwitchTask = nil } }
+            do {
+                var replacement: SIDisplay? = duoDisplays[chrome.screenID]
+                var lastError: Error?
+                for _ in 0..<60 {
+                    if replacement != nil { break }
+                    try Task.checkCancellation()
+                    do {
+                        (_, _, replacement) = try await CoreSimulatorConnection.connect(deviceInfo.id,
+                            screenID: chrome.screenID, width: chrome.pixelWidth, height: chrome.pixelHeight)
+                        break
+                    } catch {
+                        lastError = error
+                        try await Task.sleep(for: .milliseconds(500))
+                    }
+                }
+                try Task.checkCancellation()
+                guard !closed, displaySwitchVersion == version, displayMode == mode else { return }
+                guard let replacement = duoDisplays[chrome.screenID] ?? replacement else {
+                    throw lastError ?? SimulatorError(message: "Display unavailable.")
+                }
+                if duoDisplays[chrome.screenID] == nil {
+                    try observeDuoDisplay(replacement, chrome: chrome)
+                }
+                // Discard host gestures begun while input was disabled; the
+                // new digitizer must not receive a move without a touch-down.
+                screen.releaseKeys()
+                display = replacement
+                connectedScreenID = chrome.screenID
+                input?.setDigitizerTarget(chrome.digitizerTarget)
+                screen.setDisplay(replacement, chrome: chrome)
+                screen.input = input
+                screen.needsDisplay = true
+                window?.makeFirstResponder(screen)
+            } catch is CancellationError { }
+            catch {
+                // A failed panel handoff has already detached input from the
+                // previous digitizer. Do not leave a framebuffer that looks
+                // usable but can no longer receive clicks. Only the current
+                // request may replace the connection state with Retry UI.
+                guard !closed, displaySwitchVersion == version, displayMode == mode else { return }
+                displaySwitchTask = nil
+                disconnect(message: error.localizedDescription)
+            }
+        }
+    }
+    private func observeDuoDisplay(_ display: SIDisplay, chrome: DeviceChrome) throws {
+        let delivery = DisplayFrameDelivery { [weak self, weak display] in
+            guard let self, let display, duoDisplays[chrome.screenID] === display else { return }
+            presentation.canvas.updateDuoDisplay(display, chrome: chrome)
+            if self.display === display { screen.renderer.requestFrame() }
+        }
+        // Register before starting; a callback can arrive immediately.
+        duoDisplays[chrome.screenID] = display
+        do { try display.start(frameHandler: { delivery.requestFrame() }) }
+        catch { duoDisplays[chrome.screenID] = nil; throw error }
+        delivery.requestFrame()
+    }
+
+    private func warmDuoDisplays() {
+        displayWarmupTask?.cancel()
+        displayWarmupTask = Task { [weak self] in
+            guard let self else { return }
+            for mode in [DeviceDisplayMode.cover, .innerFullyOpen] {
+                let chrome = DeviceChrome.load(for: deviceInfo, displayMode: mode)
+                guard duoDisplays[chrome.screenID] == nil else { continue }
+                do {
+                    let (_, _, panel) = try await CoreSimulatorConnection.connect(deviceInfo.id,
+                        screenID: chrome.screenID, width: chrome.pixelWidth, height: chrome.pixelHeight)
+                    try Task.checkCancellation()
+                    guard !closed, duoDisplays[chrome.screenID] == nil else { continue }
+                    try observeDuoDisplay(panel, chrome: chrome)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // The normal switch path retries an unavailable panel.
+                }
+            }
+        }
+    }
+
+    private func stopDisplays() {
+        displayWarmupTask?.cancel()
+        displayWarmupTask = nil
+        display?.stop()
+        for panel in duoDisplays.values where panel !== display { panel.stop() }
+        duoDisplays.removeAll()
+    }
     private func rotate(to turns: Int) {
         screen.releaseKeys()
         let orientations: [UInt32] = [1, 3, 2, 4]
+        let isFoldable = !displayModes.isEmpty
         Task {
             do {
-                try await input?.rotate(orientation: orientations[turns], udid: deviceInfo.id)
+                if isFoldable {
+                    guard input?.setFoldableOrientation(quarterTurns: turns) == true else {
+                        throw SimulatorError(message: "The Duo orientation control is unavailable.")
+                    }
+                    try await Task.sleep(for: .milliseconds(350))
+                } else {
+                    try await input?.rotate(orientation: orientations[turns], udid: deviceInfo.id)
+                }
                 guard !closed, connected else { return }
                 presentation.layoutSubtreeIfNeeded()
                 let previousScale = presentation.canvas.fittedGeometry.scale
@@ -401,8 +704,10 @@ enum DeviceCommand: Int {
     private func captureScreenshot() async throws -> (CGImage, Data, CGFloat) {
         guard let image = screen.currentImage() else { throw SimulatorError(message: "The simulator has not produced a frame yet.") }
         let context = screen.renderer.engine.images
-        let chrome = presentation.canvas.chrome
-        let logicalWidth = screen.quarterTurns % 2 == 0 ? chrome.logicalScreenSize.width : chrome.logicalScreenSize.height
+        // The requested pose may already have changed while its framebuffer is
+        // still connecting. Describe the panel that produced these pixels.
+        let chrome = screen.displayChrome ?? presentation.canvas.chrome
+        let logicalWidth = screen.displayQuarterTurns % 2 == 0 ? chrome.logicalScreenSize.width : chrome.logicalScreenSize.height
         let radius = chrome.cornerRadius * image.extent.width / logicalWidth
         return try await Task.detached(priority: .userInitiated) {
             guard let frame = context.createCGImage(image, from: image.extent) else {
@@ -483,7 +788,9 @@ enum DeviceCommand: Int {
     }
     func startRecording(to url: URL, showPreview: Bool = true) throws {
         guard recording == nil else { return }
-        let session = try VideoRecording(deviceID: deviceInfo.id, outputURL: url)
+        let recordingChrome = screen.displayChrome ?? presentation.canvas.chrome
+        let displayID = displayModes.isEmpty ? nil : connectedScreenID
+        let session = try VideoRecording(deviceID: deviceInfo.id, displayID: displayID, outputURL: url)
         recording = session
         updateStatus()
         let file = CaptureFile(temporaryURL: url, kind: .recording)
@@ -515,9 +822,9 @@ enum DeviceCommand: Int {
                         _ = try await Task.detached(priority: .userInitiated) { try file.save(in: directory) }.value
                         return
                     }
-                    let chrome = presentation.canvas.chrome
-                    let logicalWidth = image.width <= image.height ? chrome.logicalScreenSize.width : chrome.logicalScreenSize.height
-                    let radius = chrome.cornerRadius * CGFloat(image.width) / logicalWidth
+                    let logicalWidth = image.width <= image.height
+                        ? recordingChrome.logicalScreenSize.width : recordingChrome.logicalScreenSize.height
+                    let radius = recordingChrome.cornerRadius * CGFloat(image.width) / logicalWidth
                     capturePreviews.show(image, file: file, cornerRadius: radius, beside: window)
                 }
             } catch { report(error) }
@@ -566,11 +873,13 @@ enum DeviceCommand: Int {
     func windowWillClose(_ notification: Notification) {
         closed = true
         connectTask?.cancel()
+        displaySwitchTask?.cancel()
+        hingeAnimationTask?.cancel()
         deviceObservation?.cancel()
         presentation.isFullScreen = false
         stopRecording()
         screen.releaseKeys()
-        display?.stop()
+        stopDisplays()
         screen.display = nil; screen.input = nil; display = nil; input = nil
         onClose?()
     }
@@ -647,7 +956,7 @@ enum DeviceCommand: Int {
         fullScreenChrome?.refresh()
         guard let window else { return }
         (window as? DeviceHostWindow)?.updatePresentationBackground()
-        presentation.controls.attachWindowButtons(window)
+        presentation.controls.attach(to: window)
         presentation.controls.isHidden = false
         presentation.refreshGeometry()
     }

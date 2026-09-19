@@ -38,10 +38,17 @@ final class MetalScreenEngine: Sendable {
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
     }
-    func texture(for surface: IOSurface) -> MTLTexture? {
+    func texture(for surface: IOSurface, sRGB: Bool = false) -> MTLTexture? {
         let format = surface.pixelFormat
         guard format == 0x42475241 || format == 0x52474241 else { return nil }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format == 0x42475241 ? .bgra8Unorm : .rgba8Unorm,
+        let pixelFormat: MTLPixelFormat
+        switch (format, sRGB) {
+        case (0x42475241, true): pixelFormat = .bgra8Unorm_srgb
+        case (0x52474241, true): pixelFormat = .rgba8Unorm_srgb
+        case (0x42475241, false): pixelFormat = .bgra8Unorm
+        default: pixelFormat = .rgba8Unorm
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: pixelFormat,
             width: surface.width, height: surface.height, mipmapped: false)
         descriptor.storageMode = .shared
         descriptor.usage = .shaderRead
@@ -98,6 +105,7 @@ final class ScreenRenderer: @unchecked Sendable {
     private var size = CGSize.zero
     private var pending = false
     private var scheduled = false
+    private var enabled = true
     private var cachedSurface: IOSurface?
     private var cachedTexture: MTLTexture?
     @MainActor init() throws {
@@ -116,6 +124,10 @@ final class ScreenRenderer: @unchecked Sendable {
         lock.lock(); self.display = display; lock.unlock()
         requestFrame()
     }
+    func setEnabled(_ enabled: Bool) {
+        lock.withLock { self.enabled = enabled }
+        if enabled { requestFrame() }
+    }
     @MainActor func configure(size: CGSize, scale: CGFloat, turns: Int) {
         let pixels = CGSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
         layer.contentsScale = scale
@@ -125,6 +137,7 @@ final class ScreenRenderer: @unchecked Sendable {
     }
     func requestFrame() {
         lock.lock()
+        guard enabled else { lock.unlock(); return }
         pending = true
         let shouldSchedule = !scheduled && inFlight < 2
         if shouldSchedule { scheduled = true }
@@ -133,7 +146,7 @@ final class ScreenRenderer: @unchecked Sendable {
     }
     private func render() {
         lock.lock()
-        let display = display, size = size
+        let display = enabled ? display : nil, size = size
         pending = false; scheduled = false; inFlight += 1
         lock.unlock()
         guard size.width > 1, size.height > 1, display != nil,
