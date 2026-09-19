@@ -18,7 +18,10 @@ The runtime selection is `DEVELOPER_DIR`, otherwise the newest Xcode found in
 `/Applications` (with the selected Xcode preferred for equal versions), then
 the `xcode-select` link as fallback. This is not simply the current SDK selected
 by `xcode-select`. Build tools follow their own `DEVELOPER_DIR` / `xcode-select`
-environment. Use an explicit `DEVELOPER_DIR` for compatibility testing.
+environment. Do not set `DEVELOPER_DIR` for ordinary app launches or the default
+Duo smoke test: doing so disables newest-Xcode discovery. Use an explicit
+`DEVELOPER_DIR` only when intentionally testing compatibility with a specific
+Xcode installation.
 Video recording passes the same selected developer directory to `xcrun` as
 the command runner and dynamically loaded simulator frameworks. On a foldable
 it also passes the currently connected screen ID, instead of relying on
@@ -104,6 +107,10 @@ it also passes the currently connected screen ID, instead of relying on
 ## Repeatable checks
 
 ```sh
+swift test
+scripts/check-duo.sh
+
+# Compatibility matrix: intentionally pin one Xcode at a time.
 DEVELOPER_DIR=/Applications/Xcode-27-beta.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode-27-beta.app/Contents/Developer scripts/check-duo.sh
 DEVELOPER_DIR=/Applications/Xcode-26.app/Contents/Developer swift test
