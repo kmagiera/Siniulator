@@ -4,9 +4,13 @@
 
 With Xcode 27, [Device Hub](https://developer.apple.com/videos/play/wwdc2026/260/) replaces the Simulator app on macOS. Siniulator connects to the iOS simulators installed through Xcode and brings back the familiar ergonomics, shortcuts, and features provided by the original Simulator app. It is made for developers who prefer the original Simulator app workflow or rely on functionality missing from Device Hub.
 
-![Siniulator alongside Xcode on macOS](docs/assets/siniulator-desktop.png)
-
-![Siniulator running multiple iOS simulators on macOS](docs/assets/siniulator-multiple-devices.jpg)
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/siniulator-multiple-devices.jpg">
+    <source type="image/webp" srcset="docs/assets/siniulator-demo.webp">
+    <img src="docs/assets/siniulator-multiple-devices.jpg" width="960" alt="Siniulator running multiple iOS simulators on macOS">
+  </picture>
+</p>
 
 <div align="center">
 
