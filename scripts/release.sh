@@ -30,6 +30,7 @@ else
 fi
 export SPARKLE_PUBLIC_ED_KEY="$public_key"
 export BUILD_ARCHS="${BUILD_ARCHS:-arm64 x86_64}"
+download_url_prefix="${APPCAST_DOWNLOAD_URL_PREFIX:-https://updates.siniulator.app/}"
 release_directory="$project_root/build/release"
 updates_directory="$release_directory/updates"
 archive_name="Siniulator-$RELEASE_VERSION-$BUILD_NUMBER.dmg"
@@ -88,7 +89,7 @@ mkdir "$staged_updates"
 cp "$work_directory/$archive_name" "$staged_updates/$archive_name"
 "$project_root/scripts/generate-appcast.sh" "$staged_updates/$archive_name" "$staged_updates/appcast.xml"
 archive_length="$(stat -f %z "$staged_updates/$archive_name")"
-valid_enclosures="$(xmllint --xpath "count(/rss/channel/item[*[local-name()='version']='$BUILD_NUMBER']/enclosure[@url='https://updates.siniulator.app/$archive_name'][@length='$archive_length'][@*[local-name()='edSignature']!=''])" "$staged_updates/appcast.xml")"
+valid_enclosures="$(xmllint --xpath "count(/rss/channel/item[*[local-name()='version']='$BUILD_NUMBER']/enclosure[@url='$download_url_prefix$archive_name'][@length='$archive_length'][@*[local-name()='edSignature']!=''])" "$staged_updates/appcast.xml")"
 [[ "$valid_enclosures" == 1 ]] || fail "The generated appcast is missing this release's signed enclosure; check the Sparkle key pair."
 # Check the exact final bytes and the packaged app before replacing any release.
 "$project_root/scripts/verify-release.sh" "$staged_updates/$archive_name"
@@ -96,4 +97,4 @@ valid_enclosures="$(xmllint --xpath "count(/rss/channel/item[*[local-name()='ver
 ditto "$staged_updates" "$updates_directory"
 cp "$archive" "$release_directory/Siniulator.dmg"
 (cd "$release_directory" && shasum -a 256 "updates/$archive_name" Siniulator.dmg > SHA256SUMS)
-printf '\nRelease ready: %s\nUpload this archive, %s/appcast.xml and %s/Siniulator.dmg to https://updates.siniulator.app/.\n' "$archive" "$updates_directory" "$release_directory"
+printf '\nRelease ready: %s\nThe appcast enclosure points to %s.\n' "$archive" "$download_url_prefix"
