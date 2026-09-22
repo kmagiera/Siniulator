@@ -27,10 +27,9 @@ Published runs fail before using secrets when:
 Published tags and release assets are immutable. Fixes therefore use a new patch
 version instead of replacing an existing DMG. Sparkle orders updates by
 `CFBundleVersion`, not by the marketing version. CI computes this build number as
-`RELEASE_BUILD_NUMBER_BASE + github.run_number`; retries of the same run keep the
-same number, and gaps caused by failed runs are harmless. Set the base once to at
-least the greatest build number published before this workflow was introduced.
-For this repository the initial value is `3`.
+`3 + github.run_number`; `3` is the greatest build number published before this
+workflow was introduced. Retries of the same run keep the same number, and gaps
+caused by failed runs are harmless.
 
 ## GitHub Actions setup
 
@@ -44,7 +43,6 @@ release → Environment variables**:
 | `APPLE_API_KEY_ID` | The App Store Connect **team** API key ID. Individual keys cannot be used by `notarytool`. |
 | `APPLE_API_ISSUER_ID` | The issuer UUID shown for the team API key. |
 | `SPARKLE_PUBLIC_ED_KEY` | The 44-character Base64 public key printed by Sparkle `generate_keys`. This is public configuration, not a secret. |
-| `RELEASE_BUILD_NUMBER_BASE` | Required; set it to `3` initially. Use a non-negative integer and never lower it while this workflow exists. |
 
 Add these environment secrets in the same environment:
 

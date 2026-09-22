@@ -35,8 +35,8 @@ jobs:
       NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
       NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER_ID }}
       SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
-      RELEASE_BUILD_NUMBER_BASE: ${{ vars.RELEASE_BUILD_NUMBER_BASE }}
       PUBLISH_RELEASE: ${{ inputs.publish }}
+      BUILD_NUMBER_OFFSET: "3"
 
     steps:
       - name: Check out the release commit
@@ -85,9 +85,7 @@ jobs:
             fi
           fi
 
-          base="${RELEASE_BUILD_NUMBER_BASE:-}"
-          [[ "$base" =~ ^[0-9]+$ ]] || fail "Set RELEASE_BUILD_NUMBER_BASE to the greatest build number published before this workflow."
-          build_number="$((base + GITHUB_RUN_NUMBER))"
+          build_number="$((BUILD_NUMBER_OFFSET + GITHUB_RUN_NUMBER))"
           (( build_number <= 9999 )) || fail "The calculated build number exceeds Apple's four-digit limit."
           archive_name="Siniulator-$RELEASE_VERSION-$build_number.dmg"
 
