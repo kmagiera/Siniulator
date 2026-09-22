@@ -18,7 +18,7 @@ as development builds. Do not edit it or create the tag first: the workflow
 injects the release version into the built bundle and creates
 `vMAJOR.MINOR.PATCH` only after every build and verification step succeeds.
 
-The workflow fails before using secrets when:
+Published runs fail before using secrets when:
 
 - the version is not a three-part numeric version;
 - its tag or GitHub Release already exists; or
@@ -66,12 +66,22 @@ personal access token for the build. The workflow pins all reusable GitHub
 Actions to full commit SHAs, grants only release and attestation permissions, and
 deletes the temporary Keychain even after failure.
 
-## Triggering a release
+## Triggering builds and releases
 
-Run the workflow on the default branch, either manually or from automation:
+The safe default is a test build. It performs the same universal build,
+Developer ID signing, notarization, stapling, and verification as a release, but
+does not create a tag or GitHub Release. Its DMG and supporting files are kept in
+a `release-candidate-VERSION-BUILD` Actions artifact for 14 days:
 
 ```sh
-gh workflow run release.yml --ref main -f version=1.2.0
+gh workflow run release.yml --ref main -f version=1.1.0
+```
+
+Set `publish=true` explicitly to create a production release. Published releases
+must run from the default branch:
+
+```sh
+gh workflow run release.yml --ref main -f version=1.2.0 -f publish=true
 ```
 
 An external caller can use GitHub's workflow-dispatch REST endpoint with a GitHub
@@ -81,7 +91,8 @@ App or fine-grained token that has Actions write access:
 {
   "ref": "main",
   "inputs": {
-    "version": "1.2.0"
+    "version": "1.2.0",
+    "publish": true
   }
 }
 ```
@@ -105,12 +116,13 @@ published:
 https://github.com/kmagiera/Siniulator/releases/latest/download/appcast.xml
 ```
 
-Have the worker refresh after a successful `Release` workflow run or a
+Have the worker refresh after a successful publishing run (`publish=true`) or a
 `release.published` webhook, validate that the response is XML, then replace the
-served `/appcast.xml` atomically. The appcast already links to the versioned DMG
-on GitHub, so the worker does not need to copy or proxy the binary. `release.json`
-contains the exact `dmgUrl` and can also drive a redirect from the existing
-`/Siniulator.dmg` download URL.
+served `/appcast.xml` atomically. Test builds deliberately use a different
+artifact name and cannot be mistaken for worker input. The appcast already links
+to the versioned DMG on GitHub, so the worker does not need to copy or proxy the
+binary. `release.json` contains the exact `dmgUrl` and can also drive a redirect
+from the existing `/Siniulator.dmg` download URL.
 
 If the worker deliberately consumes Actions artifacts instead, select the
 artifact named `appcast` from the latest successful run of `release.yml` and

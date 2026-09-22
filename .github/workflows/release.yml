@@ -7,9 +7,14 @@ on:
         description: Marketing version in MAJOR.MINOR.PATCH format (for example, 1.2.0)
         required: true
         type: string
+      publish:
+        description: Create the tag and GitHub Release (false only uploads a test artifact)
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ inputs.version }}-${{ inputs.publish }}
   cancel-in-progress: false
 
 permissions:
@@ -31,6 +36,7 @@ jobs:
       NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER_ID }}
       SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
       RELEASE_BUILD_NUMBER_BASE: ${{ vars.RELEASE_BUILD_NUMBER_BASE }}
+      PUBLISH_RELEASE: ${{ inputs.publish }}
 
     steps:
       - name: Check out the release commit
@@ -46,28 +52,29 @@ jobs:
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
 
-          [[ "$GITHUB_REF_NAME" == "${{ github.event.repository.default_branch }}" ]] || \
-            fail "Run releases from the default branch only."
           [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
             fail "version must use the MAJOR.MINOR.PATCH format."
 
           tag="v$RELEASE_VERSION"
-          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
-            fail "$tag already exists; released versions are immutable."
-          fi
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            fail "A GitHub Release already exists for $tag."
-          fi
-
-          latest_tag=""
-          while IFS= read -r candidate; do
-            if [[ "$candidate" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-              latest_tag="$candidate"
-              break
+          if [[ "$PUBLISH_RELEASE" == true ]]; then
+            [[ "$GITHUB_REF_NAME" == "${{ github.event.repository.default_branch }}" ]] || \
+              fail "Published releases must run from the default branch."
+            if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+              fail "$tag already exists; released versions are immutable."
             fi
-          done < <(git tag --list 'v*' --sort=-version:refname)
-          if [[ -n "$latest_tag" ]]; then
-            python3 - "$RELEASE_VERSION" "${latest_tag#v}" <<'PY'
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              fail "A GitHub Release already exists for $tag."
+            fi
+
+            latest_tag=""
+            while IFS= read -r candidate; do
+              if [[ "$candidate" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                latest_tag="$candidate"
+                break
+              fi
+            done < <(git tag --list 'v*' --sort=-version:refname)
+            if [[ -n "$latest_tag" ]]; then
+              python3 - "$RELEASE_VERSION" "${latest_tag#v}" <<'PY'
           import sys
 
           requested = tuple(map(int, sys.argv[1].split(".")))
@@ -75,6 +82,7 @@ jobs:
           if requested <= latest:
               raise SystemExit(f"::error::version must be greater than the latest release ({sys.argv[2]}).")
           PY
+            fi
           fi
 
           base="${RELEASE_BUILD_NUMBER_BASE:-}"
@@ -191,6 +199,7 @@ jobs:
           subject-path: ${{ steps.assets.outputs.directory }}/${{ steps.metadata.outputs.archive_name }}
 
       - name: Upload appcast for the updates worker
+        if: ${{ inputs.publish }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: appcast
@@ -202,7 +211,18 @@ jobs:
           retention-days: 90
           overwrite: true
 
+      - name: Upload test release candidate
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate-${{ inputs.version }}-${{ steps.metadata.outputs.build_number }}
+          path: ${{ steps.assets.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
       - name: Create immutable GitHub Release
+        if: ${{ inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
           ASSETS_DIRECTORY: ${{ steps.assets.outputs.directory }}
@@ -226,11 +246,18 @@ jobs:
           ARCHIVE_NAME: ${{ steps.metadata.outputs.archive_name }}
         run: |
           {
-            echo "## Siniulator $RELEASE_VERSION ($BUILD_NUMBER)"
-            echo
-            echo "- [GitHub Release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)"
-            echo "- DMG: \`$ARCHIVE_NAME\`"
-            echo "- Worker input: Actions artifact \`appcast\`"
+            if [[ "$PUBLISH_RELEASE" == true ]]; then
+              echo "## Siniulator $RELEASE_VERSION ($BUILD_NUMBER)"
+              echo
+              echo "- [GitHub Release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)"
+              echo "- DMG: \`$ARCHIVE_NAME\`"
+              echo "- Worker input: Actions artifact \`appcast\`"
+            else
+              echo "## Test build $RELEASE_VERSION ($BUILD_NUMBER)"
+              echo
+              echo "- No tag or GitHub Release was created."
+              echo "- Download the notarized DMG from the \`release-candidate-$RELEASE_VERSION-$BUILD_NUMBER\` artifact."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove temporary signing credentials
