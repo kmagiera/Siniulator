@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   release:
-    name: Build and publish ${{ inputs.version }}
+    name: Build ${{ inputs.version }}
     runs-on: macos-26
     environment: release
     timeout-minutes: 90
