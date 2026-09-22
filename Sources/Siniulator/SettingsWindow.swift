@@ -158,6 +158,7 @@ import SwiftUI
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        if version == "0.0.0" { return "Development build" }
         if let version, let build { return "Version \(version) (\(build))" }
         if let version { return "Version \(version)" }
         if let build { return "Build \(build)" }

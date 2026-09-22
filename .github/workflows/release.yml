@@ -1,0 +1,240 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Marketing version in MAJOR.MINOR.PATCH format (for example, 1.2.0)
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: Build and publish ${{ inputs.version }}
+    runs-on: macos-26
+    environment: release
+    timeout-minutes: 90
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      BUILD_ARCHS: arm64 x86_64
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+      NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER_ID }}
+      SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+      RELEASE_BUILD_NUMBER_BASE: ${{ vars.RELEASE_BUILD_NUMBER_BASE }}
+
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate version and calculate build metadata
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [[ "$GITHUB_REF_NAME" == "${{ github.event.repository.default_branch }}" ]] || \
+            fail "Run releases from the default branch only."
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
+            fail "version must use the MAJOR.MINOR.PATCH format."
+
+          tag="v$RELEASE_VERSION"
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            fail "$tag already exists; released versions are immutable."
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            fail "A GitHub Release already exists for $tag."
+          fi
+
+          latest_tag=""
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              latest_tag="$candidate"
+              break
+            fi
+          done < <(git tag --list 'v*' --sort=-version:refname)
+          if [[ -n "$latest_tag" ]]; then
+            python3 - "$RELEASE_VERSION" "${latest_tag#v}" <<'PY'
+          import sys
+
+          requested = tuple(map(int, sys.argv[1].split(".")))
+          latest = tuple(map(int, sys.argv[2].split(".")))
+          if requested <= latest:
+              raise SystemExit(f"::error::version must be greater than the latest release ({sys.argv[2]}).")
+          PY
+          fi
+
+          base="${RELEASE_BUILD_NUMBER_BASE:-}"
+          [[ "$base" =~ ^[0-9]+$ ]] || fail "Set RELEASE_BUILD_NUMBER_BASE to the greatest build number published before this workflow."
+          build_number="$((base + GITHUB_RUN_NUMBER))"
+          (( build_number <= 9999 )) || fail "The calculated build number exceeds Apple's four-digit limit."
+          archive_name="Siniulator-$RELEASE_VERSION-$build_number.dmg"
+
+          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+          {
+            echo "tag=$tag"
+            echo "build_number=$build_number"
+            echo "archive_name=$archive_name"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run unit and script tests
+        run: |
+          set -euo pipefail
+          swift test --configuration release
+          python3 -m unittest scripts.tests.test_scripts
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install the pinned DMG builder
+        run: npm install --global create-dmg@8.1.0
+
+      - name: Validate release configuration
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY_P8: ${{ secrets.APPLE_API_PRIVATE_KEY_P8 }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ -n "$MACOS_CERTIFICATE_P12" ]] || fail "Missing MACOS_CERTIFICATE_P12 secret."
+          [[ -n "$MACOS_CERTIFICATE_PASSWORD" ]] || fail "Missing MACOS_CERTIFICATE_PASSWORD secret."
+          [[ -n "$APPLE_API_PRIVATE_KEY_P8" ]] || fail "Missing APPLE_API_PRIVATE_KEY_P8 secret."
+          [[ -n "$SPARKLE_PRIVATE_ED_KEY" ]] || fail "Missing SPARKLE_PRIVATE_ED_KEY secret."
+          [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || fail "APPLE_TEAM_ID must be a 10-character team ID."
+          [[ -n "$NOTARY_KEY_ID" ]] || fail "Missing APPLE_API_KEY_ID variable."
+          [[ -n "$NOTARY_ISSUER" ]] || fail "Missing APPLE_API_ISSUER_ID variable."
+          [[ "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail "SPARKLE_PUBLIC_ED_KEY is invalid."
+
+      - name: Import Developer ID and update-signing credentials
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY_P8: ${{ secrets.APPLE_API_PRIVATE_KEY_P8 }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          certificate="$RUNNER_TEMP/developer-id-application.p12"
+          notary_key="$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8"
+          sparkle_key="$RUNNER_TEMP/sparkle-private-key"
+          keychain="$RUNNER_TEMP/siniulator-signing.keychain-db"
+          keychain_password="$(uuidgen)$(uuidgen)"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate"
+          printf '%s' "$APPLE_API_PRIVATE_KEY_P8" > "$notary_key"
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" > "$sparkle_key"
+          chmod 600 "$certificate" "$notary_key" "$sparkle_key"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/{print $2}')"
+          [[ "$(printf '%s\n' "$identity" | sed '/^$/d' | wc -l | tr -d ' ')" == 1 ]] || {
+            echo "::error::The certificate secret must contain exactly one Developer ID Application identity."
+            exit 1
+          }
+
+          {
+            echo "CODE_SIGN_IDENTITY=$identity"
+            echo "CODE_SIGN_KEYCHAIN=$keychain"
+            echo "NOTARY_KEY_PATH=$notary_key"
+            echo "SPARKLE_PRIVATE_KEY_FILE=$sparkle_key"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize and verify the release
+        run: scripts/release.sh
+
+      - name: Prepare release assets
+        id: assets
+        env:
+          ARCHIVE_NAME: ${{ steps.metadata.outputs.archive_name }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/release-assets"
+          mkdir -p "$assets"
+          cp "build/release/updates/$ARCHIVE_NAME" "$assets/$ARCHIVE_NAME"
+          cp build/release/updates/appcast.xml "$assets/appcast.xml"
+          (cd "$assets" && shasum -a 256 "$ARCHIVE_NAME" > SHA256SUMS)
+          jq -n \
+            --arg version "$RELEASE_VERSION" \
+            --arg buildNumber "$BUILD_NUMBER" \
+            --arg tag "$RELEASE_TAG" \
+            --arg releaseUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            --arg dmgUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$ARCHIVE_NAME" \
+            '{version: $version, buildNumber: $buildNumber, tag: $tag, releaseUrl: $releaseUrl, dmgUrl: $dmgUrl}' \
+            > "$assets/release.json"
+          echo "directory=$assets" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the DMG build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ steps.assets.outputs.directory }}/${{ steps.metadata.outputs.archive_name }}
+
+      - name: Upload appcast for the updates worker
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: appcast
+          path: |
+            ${{ steps.assets.outputs.directory }}/appcast.xml
+            ${{ steps.assets.outputs.directory }}/release.json
+            ${{ steps.assets.outputs.directory }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+      - name: Create immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSETS_DIRECTORY: ${{ steps.assets.outputs.directory }}
+          ARCHIVE_NAME: ${{ steps.metadata.outputs.archive_name }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            "$ASSETS_DIRECTORY/$ARCHIVE_NAME#Universal notarized macOS DMG" \
+            "$ASSETS_DIRECTORY/appcast.xml#Signed Sparkle appcast" \
+            "$ASSETS_DIRECTORY/release.json#Machine-readable release metadata" \
+            "$ASSETS_DIRECTORY/SHA256SUMS#SHA-256 checksum" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Siniulator $RELEASE_VERSION" \
+            --generate-notes
+
+      - name: Write release summary
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          ARCHIVE_NAME: ${{ steps.metadata.outputs.archive_name }}
+        run: |
+          {
+            echo "## Siniulator $RELEASE_VERSION ($BUILD_NUMBER)"
+            echo
+            echo "- [GitHub Release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)"
+            echo "- DMG: \`$ARCHIVE_NAME\`"
+            echo "- Worker input: Actions artifact \`appcast\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/siniulator-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8" "$RUNNER_TEMP/sparkle-private-key"
