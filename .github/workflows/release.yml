@@ -125,7 +125,8 @@ jobs:
           [[ -n "$SPARKLE_PRIVATE_ED_KEY" ]] || fail "Missing SPARKLE_PRIVATE_ED_KEY secret."
           [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || fail "APPLE_TEAM_ID must be a 10-character team ID."
           [[ -n "$NOTARY_KEY_ID" ]] || fail "Missing APPLE_API_KEY_ID variable."
-          [[ -n "$NOTARY_ISSUER" ]] || fail "Missing APPLE_API_ISSUER_ID variable."
+          [[ -z "$NOTARY_ISSUER" || "$NOTARY_ISSUER" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || \
+            fail "APPLE_API_ISSUER_ID must be a UUID when using a Team API Key."
           [[ "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail "SPARKLE_PUBLIC_ED_KEY is invalid."
 
       - name: Import Developer ID and update-signing credentials

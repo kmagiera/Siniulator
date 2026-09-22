@@ -40,8 +40,8 @@ release → Environment variables**:
 | Variable | Format |
 | --- | --- |
 | `APPLE_TEAM_ID` | The 10-character Apple Developer Team ID, for example `A1B2C3D4E5`. |
-| `APPLE_API_KEY_ID` | The App Store Connect **team** API key ID. Individual keys cannot be used by `notarytool`. |
-| `APPLE_API_ISSUER_ID` | The issuer UUID shown for the team API key. |
+| `APPLE_API_KEY_ID` | The App Store Connect Team or Individual API key ID. |
+| `APPLE_API_ISSUER_ID` | The issuer UUID shown for a Team API Key. Omit this variable for an Individual API Key. |
 | `SPARKLE_PUBLIC_ED_KEY` | The 44-character Base64 public key printed by Sparkle `generate_keys`. This is public configuration, not a secret. |
 
 Add these environment secrets in the same environment:
