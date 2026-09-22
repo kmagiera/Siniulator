@@ -142,6 +142,9 @@ final class NativeWindowChromeTests: XCTestCase {
         let duo = SimulatorDevice(udid: "duo-layout", name: "iPhone Duo", state: "Booted", isAvailable: true,
             deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
             runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
+        guard DeviceChrome.displayModes(for: duo) == DeviceDisplayMode.allCases else {
+            throw XCTSkip("The selected Xcode does not include the Duo device profile")
+        }
         let host = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 800, height: 500),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
@@ -306,6 +309,9 @@ final class NativeWindowChromeTests: XCTestCase {
         window.contentView = NativeChromeTestRoot()
         let device = SimulatorDevice(udid: "test", name: "iPhone Duo", state: "Booted", isAvailable: true,
             deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo")
+        guard DeviceChrome.displayModes(for: device) == DeviceDisplayMode.allCases else {
+            throw XCTSkip("The selected Xcode does not include the Duo device profile")
+        }
         var commands: [DeviceCommand] = []
         let bar = SimulatorControlBar(device: device) { commands.append($0) }
         window.contentView!.addSubview(bar)
