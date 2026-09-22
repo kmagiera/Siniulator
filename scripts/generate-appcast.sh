@@ -9,11 +9,14 @@ output="$2"
 [[ -z "${SPARKLE_PRIVATE_KEY:-}" || -z "${SPARKLE_PRIVATE_KEY_FILE:-}" ]] || fail "Use either SPARKLE_PRIVATE_KEY or SPARKLE_PRIVATE_KEY_FILE."
 sparkle_tool="$project_root/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
 [[ -x "$sparkle_tool" ]] || fail "Sparkle's generate_appcast tool was not found; run swift package resolve."
-download_url_prefix="${APPCAST_DOWNLOAD_URL_PREFIX:-https://updates.siniulator.app/}"
-[[ "$download_url_prefix" == https://*/ ]] || fail "APPCAST_DOWNLOAD_URL_PREFIX must be an HTTPS URL ending in /."
-case "$download_url_prefix" in
-    *"'"*|*'"'*|*"["*|*"]"*|*" "*|*$'\t'*|*$'\n'*) fail "APPCAST_DOWNLOAD_URL_PREFIX contains unsupported characters." ;;
-esac
+download_url_prefix="https://updates.siniulator.app/"
+if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "GITHUB_REPOSITORY is invalid."
+    [[ "${RELEASE_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "RELEASE_VERSION is required in GitHub Actions."
+    github_server_url="${GITHUB_SERVER_URL:-https://github.com}"
+    [[ "$github_server_url" == https://* ]] || fail "GITHUB_SERVER_URL must use HTTPS."
+    download_url_prefix="${github_server_url%/}/$GITHUB_REPOSITORY/releases/download/v$RELEASE_VERSION/"
+fi
 arguments=(--download-url-prefix "$download_url_prefix" --maximum-versions 1 --maximum-deltas 0)
 if [[ -n "${SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
     [[ -r "$SPARKLE_PRIVATE_KEY_FILE" ]] || fail "SPARKLE_PRIVATE_KEY_FILE is not readable."

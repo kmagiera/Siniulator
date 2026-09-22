@@ -189,9 +189,9 @@ to `arm64 x86_64` for releases; use `arm64` or `x86_64` for a single architectur
 `build-app.sh` defaults to the host architecture and accepts the same build,
 version, public-key and code-signing variables.
 
-Set `APPCAST_DOWNLOAD_URL_PREFIX` to an HTTPS URL ending in `/` when the DMG is
-hosted somewhere other than `https://updates.siniulator.app/`. GitHub Actions
-sets it to the versioned GitHub Release download path.
+In GitHub Actions the scripts derive the versioned asset URL from
+`GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, and `RELEASE_VERSION`. Local releases
+continue to use `https://updates.siniulator.app/` without extra configuration.
 
 The release script:
 

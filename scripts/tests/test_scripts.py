@@ -212,7 +212,9 @@ cp "$TEST_FEED" "$directory/appcast.xml"
         self.assertEqual(output.read_text(), generated.read_text())
 
         github_prefix = "https://github.com/kmagiera/Siniulator/releases/download/v0.1.0/"
-        self.env["APPCAST_DOWNLOAD_URL_PREFIX"] = github_prefix
+        self.env["GITHUB_SERVER_URL"] = "https://github.com"
+        self.env["GITHUB_REPOSITORY"] = "kmagiera/Siniulator"
+        self.env["RELEASE_VERSION"] = "0.1.0"
         generated.write_text(f'<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>{item(prefix=github_prefix)}</channel></rss>')
         result = self.run_script("generate-appcast.sh", str(archive), str(output))
         self.assertEqual(result.returncode, 0, result.stderr)

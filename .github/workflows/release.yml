@@ -82,17 +82,12 @@ jobs:
           build_number="$((base + GITHUB_RUN_NUMBER))"
           (( build_number <= 9999 )) || fail "The calculated build number exceeds Apple's four-digit limit."
           archive_name="Siniulator-$RELEASE_VERSION-$build_number.dmg"
-          download_prefix="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/"
 
-          {
-            echo "BUILD_NUMBER=$build_number"
-            echo "APPCAST_DOWNLOAD_URL_PREFIX=$download_prefix"
-          } >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           {
             echo "tag=$tag"
             echo "build_number=$build_number"
             echo "archive_name=$archive_name"
-            echo "download_prefix=$download_prefix"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run unit and script tests
@@ -184,8 +179,8 @@ jobs:
             --arg version "$RELEASE_VERSION" \
             --arg buildNumber "$BUILD_NUMBER" \
             --arg tag "$RELEASE_TAG" \
-            --arg releaseUrl "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
-            --arg dmgUrl "$APPCAST_DOWNLOAD_URL_PREFIX$ARCHIVE_NAME" \
+            --arg releaseUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            --arg dmgUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$ARCHIVE_NAME" \
             '{version: $version, buildNumber: $buildNumber, tag: $tag, releaseUrl: $releaseUrl, dmgUrl: $dmgUrl}' \
             > "$assets/release.json"
           echo "directory=$assets" >> "$GITHUB_OUTPUT"
@@ -233,7 +228,7 @@ jobs:
           {
             echo "## Siniulator $RELEASE_VERSION ($BUILD_NUMBER)"
             echo
-            echo "- [GitHub Release](https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)"
+            echo "- [GitHub Release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)"
             echo "- DMG: \`$ARCHIVE_NAME\`"
             echo "- Worker input: Actions artifact \`appcast\`"
           } >> "$GITHUB_STEP_SUMMARY"
