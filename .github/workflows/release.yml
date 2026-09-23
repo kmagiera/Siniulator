@@ -103,7 +103,7 @@ jobs:
           python3 -m unittest scripts.tests.test_scripts
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
 
@@ -136,11 +136,13 @@ jobs:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
           certificate="$RUNNER_TEMP/developer-id-application.p12"
           notary_key="$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8"
           sparkle_key="$RUNNER_TEMP/sparkle-private-key"
           keychain="$RUNNER_TEMP/siniulator-signing.keychain-db"
           keychain_password="$(uuidgen)$(uuidgen)"
+          signing_probe="$RUNNER_TEMP/codesign-probe"
 
           printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate"
           printf '%s' "$APPLE_API_PRIVATE_KEY_P8" > "$notary_key"
@@ -150,14 +152,44 @@ jobs:
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          default_keychain="$(security default-keychain -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+          [[ -n "$default_keychain" ]] || fail "Could not resolve the runner's default Keychain."
+          security list-keychains -d user -s "$keychain" "$default_keychain"
           security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
 
-          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/{print $2}')"
-          [[ "$(printf '%s\n' "$identity" | sed '/^$/d' | wc -l | tr -d ' ')" == 1 ]] || {
-            echo "::error::The certificate secret must contain exactly one Developer ID Application identity."
-            exit 1
+          identity_lines="$(security find-identity -v -p codesigning "$keychain" | grep 'Developer ID Application:' || true)"
+          [[ "$(printf '%s\n' "$identity_lines" | sed '/^$/d' | wc -l | tr -d ' ')" == 1 ]] || \
+            fail "The certificate secret must contain exactly one Developer ID Application identity."
+          [[ "$identity_lines" == *"($APPLE_TEAM_ID)"* ]] || \
+            fail "The Developer ID certificate does not belong to APPLE_TEAM_ID."
+          identity="$(printf '%s\n' "$identity_lines" | awk '{print $2}')"
+
+          cp /usr/bin/true "$signing_probe"
+          codesign --force --sign "$identity" --options runtime --timestamp --keychain "$keychain" "$signing_probe"
+          codesign --verify --strict --verbose=2 "$signing_probe"
+          rm -f "$signing_probe"
+
+          derived_sparkle_public_key="$(swift - "$sparkle_key" <<'SWIFT'
+          import CryptoKit
+          import Foundation
+
+          let encodedKey = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+          guard let seed = Data(base64Encoded: encodedKey), seed.count == 32 else {
+              fatalError("The exported Sparkle private key is not a 32-byte Base64 seed.")
           }
+          let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+          print(privateKey.publicKey.rawRepresentation.base64EncodedString())
+          SWIFT
+          )"
+          [[ "$derived_sparkle_public_key" == "$SPARKLE_PUBLIC_ED_KEY" ]] || \
+            fail "SPARKLE_PRIVATE_ED_KEY does not match SPARKLE_PUBLIC_ED_KEY."
+
+          xcrun notarytool history \
+            --key "$notary_key" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER" >/dev/null
 
           {
             echo "CODE_SIGN_IDENTITY=$identity"
@@ -229,7 +261,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
-            "$ASSETS_DIRECTORY/$ARCHIVE_NAME#Universal notarized macOS DMG" \
+            "$ASSETS_DIRECTORY/$ARCHIVE_NAME#Apple silicon notarized macOS DMG" \
             "$ASSETS_DIRECTORY/appcast.xml#Signed Sparkle appcast" \
             "$ASSETS_DIRECTORY/release.json#Machine-readable release metadata" \
             "$ASSETS_DIRECTORY/SHA256SUMS#SHA-256 checksum" \
@@ -262,4 +294,5 @@ jobs:
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/siniulator-signing.keychain-db" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8" "$RUNNER_TEMP/sparkle-private-key"
+          rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8" \
+            "$RUNNER_TEMP/sparkle-private-key" "$RUNNER_TEMP/codesign-probe"
