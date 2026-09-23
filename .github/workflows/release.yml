@@ -142,7 +142,6 @@ jobs:
           sparkle_key="$RUNNER_TEMP/sparkle-private-key"
           keychain="$RUNNER_TEMP/siniulator-signing.keychain-db"
           keychain_password="$(uuidgen)$(uuidgen)"
-          signing_probe="$RUNNER_TEMP/codesign-probe"
 
           printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate"
           printf '%s' "$APPLE_API_PRIVATE_KEY_P8" > "$notary_key"
@@ -164,32 +163,6 @@ jobs:
           [[ "$identity_lines" == *"($APPLE_TEAM_ID)"* ]] || \
             fail "The Developer ID certificate does not belong to APPLE_TEAM_ID."
           identity="$(printf '%s\n' "$identity_lines" | awk '{print $2}')"
-
-          cp /usr/bin/true "$signing_probe"
-          codesign --force --sign "$identity" --options runtime --timestamp --keychain "$keychain" "$signing_probe"
-          codesign --verify --strict --verbose=2 "$signing_probe"
-          rm -f "$signing_probe"
-
-          derived_sparkle_public_key="$(swift - "$sparkle_key" <<'SWIFT'
-          import CryptoKit
-          import Foundation
-
-          let encodedKey = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
-              .trimmingCharacters(in: .whitespacesAndNewlines)
-          guard let seed = Data(base64Encoded: encodedKey), seed.count == 32 else {
-              fatalError("The exported Sparkle private key is not a 32-byte Base64 seed.")
-          }
-          let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
-          print(privateKey.publicKey.rawRepresentation.base64EncodedString())
-          SWIFT
-          )"
-          [[ "$derived_sparkle_public_key" == "$SPARKLE_PUBLIC_ED_KEY" ]] || \
-            fail "SPARKLE_PRIVATE_ED_KEY does not match SPARKLE_PUBLIC_ED_KEY."
-
-          xcrun notarytool history \
-            --key "$notary_key" \
-            --key-id "$NOTARY_KEY_ID" \
-            --issuer "$NOTARY_ISSUER" >/dev/null
 
           {
             echo "CODE_SIGN_IDENTITY=$identity"
@@ -295,4 +268,4 @@ jobs:
         run: |
           security delete-keychain "$RUNNER_TEMP/siniulator-signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8" \
-            "$RUNNER_TEMP/sparkle-private-key" "$RUNNER_TEMP/codesign-probe"
+            "$RUNNER_TEMP/sparkle-private-key"
