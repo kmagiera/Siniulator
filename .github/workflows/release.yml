@@ -103,7 +103,7 @@ jobs:
           python3 -m unittest scripts.tests.test_scripts
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
 
@@ -136,6 +136,7 @@ jobs:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
           certificate="$RUNNER_TEMP/developer-id-application.p12"
           notary_key="$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8"
           sparkle_key="$RUNNER_TEMP/sparkle-private-key"
@@ -150,14 +151,18 @@ jobs:
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          default_keychain="$(security default-keychain -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+          [[ -n "$default_keychain" ]] || fail "Could not resolve the runner's default Keychain."
+          security list-keychains -d user -s "$keychain" "$default_keychain"
           security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
 
-          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/{print $2}')"
-          [[ "$(printf '%s\n' "$identity" | sed '/^$/d' | wc -l | tr -d ' ')" == 1 ]] || {
-            echo "::error::The certificate secret must contain exactly one Developer ID Application identity."
-            exit 1
-          }
+          identity_lines="$(security find-identity -v -p codesigning "$keychain" | grep 'Developer ID Application:' || true)"
+          [[ "$(printf '%s\n' "$identity_lines" | sed '/^$/d' | wc -l | tr -d ' ')" == 1 ]] || \
+            fail "The certificate secret must contain exactly one Developer ID Application identity."
+          [[ "$identity_lines" == *"($APPLE_TEAM_ID)"* ]] || \
+            fail "The Developer ID certificate does not belong to APPLE_TEAM_ID."
+          identity="$(printf '%s\n' "$identity_lines" | awk '{print $2}')"
 
           {
             echo "CODE_SIGN_IDENTITY=$identity"
@@ -198,7 +203,7 @@ jobs:
 
       - name: Upload appcast for the updates worker
         if: ${{ inputs.publish }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: appcast
           path: |
@@ -211,7 +216,7 @@ jobs:
 
       - name: Upload test release candidate
         if: ${{ !inputs.publish }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-candidate-${{ inputs.version }}-${{ steps.metadata.outputs.build_number }}
           path: ${{ steps.assets.outputs.directory }}
@@ -229,7 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
-            "$ASSETS_DIRECTORY/$ARCHIVE_NAME#Universal notarized macOS DMG" \
+            "$ASSETS_DIRECTORY/$ARCHIVE_NAME#Apple silicon notarized macOS DMG" \
             "$ASSETS_DIRECTORY/appcast.xml#Signed Sparkle appcast" \
             "$ASSETS_DIRECTORY/release.json#Machine-readable release metadata" \
             "$ASSETS_DIRECTORY/SHA256SUMS#SHA-256 checksum" \
@@ -262,4 +267,5 @@ jobs:
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/siniulator-signing.keychain-db" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8" "$RUNNER_TEMP/sparkle-private-key"
+          rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8" \
+            "$RUNNER_TEMP/sparkle-private-key"
