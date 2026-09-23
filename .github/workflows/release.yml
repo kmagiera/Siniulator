@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 90
     env:
       RELEASE_VERSION: ${{ inputs.version }}
-      BUILD_ARCHS: arm64 x86_64
+      BUILD_ARCHS: arm64
       APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
       NOTARY_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
       NOTARY_ISSUER: ${{ vars.APPLE_API_ISSUER_ID }}

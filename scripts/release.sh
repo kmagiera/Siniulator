@@ -29,7 +29,7 @@ else
     notary_arguments=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
 fi
 export SPARKLE_PUBLIC_ED_KEY="$public_key"
-export BUILD_ARCHS="${BUILD_ARCHS:-arm64 x86_64}"
+export BUILD_ARCHS="${BUILD_ARCHS:-arm64}"
 release_directory="$project_root/build/release"
 updates_directory="$release_directory/updates"
 archive_name="Siniulator-$RELEASE_VERSION-$BUILD_NUMBER.dmg"
