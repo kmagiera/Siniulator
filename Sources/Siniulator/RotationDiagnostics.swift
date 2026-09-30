@@ -15,9 +15,7 @@ extension Diagnostics {
                 if target.screen.quarterTurns == turns { break }
                 try await Task.sleep(for: .milliseconds(50))
             }
-            let isFoldable = target.presentation.canvas.chrome.displayMode != nil
-            let guestTurns = isFoldable ? turns
-                : try await target.screen.input?.orientationTurns(udid: target.deviceInfo.id)
+            let guestTurns = try await target.screen.input?.orientationTurns(udid: target.deviceInfo.id)
             guard target.screen.quarterTurns == turns, guestTurns == turns else {
                 throw SimulatorError(message: "Guest orientation did not reach \(turns).")
             }
@@ -41,8 +39,8 @@ extension Diagnostics {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             await app.store.refresh()
-            guard let device = app.store.devices.first(where: \.isBooted) else {
-                throw SimulatorError(message: "Rotation test requires an already booted simulator.")
+            guard let device = ordinaryPresentationDevices(in: app.store.devices).first else {
+                throw SimulatorError(message: "Rotation test requires a booted non-foldable simulator; use --duo-smoke for Duo.")
             }
             app.open(device)
             guard let target = app.deviceWindows[device.id], let window = target.window else {

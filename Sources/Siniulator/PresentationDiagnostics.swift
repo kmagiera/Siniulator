@@ -13,8 +13,8 @@ extension Diagnostics {
                 if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
             }
             await app.store.refresh()
-            let devices = Array(app.store.devices.filter(\.isBooted).prefix(2))
-            guard !devices.isEmpty else { throw SimulatorError(message: "Presentation test needs a booted device.") }
+            let devices = Array(ordinaryPresentationDevices(in: app.store.devices).prefix(2))
+            guard !devices.isEmpty else { throw SimulatorError(message: "Presentation test requires a booted non-foldable simulator; use --duo-smoke for Duo.") }
             for device in devices { app.open(device) }
             for _ in 0..<150 {
                 // Wait for the initial connection before exercising window modes.

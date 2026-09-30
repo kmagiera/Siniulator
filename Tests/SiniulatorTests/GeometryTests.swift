@@ -3,31 +3,6 @@ import XCTest
 @testable import Siniulator
 
 final class GeometryTests: XCTestCase {
-    func testDuoPresetAnimationEasesBothEndsWithoutOvershooting() {
-        for (start, target) in [(0.0, 180.0), (180, 0), (60, 120), (120, 60)] {
-            let animation = DuoHingeAnimation(start: start, target: target)
-            XCTAssertEqual(animation.angle(at: -1), start)
-            XCTAssertEqual(animation.angle(at: 0), start)
-            XCTAssertEqual(animation.angle(at: 1), target)
-            XCTAssertEqual(animation.angle(at: 2), target)
-            XCTAssertEqual(animation.angle(at: 0.5), (start + target) / 2, accuracy: 1e-9)
-            let distance = abs(target - start)
-            XCTAssertLessThan(abs(animation.angle(at: 0.1) - start), distance * 0.02)
-            XCTAssertLessThan(abs(target - animation.angle(at: 0.9)), distance * 0.02)
-            var previous = start
-            for step in 1...100 {
-                let current = animation.angle(at: Double(step) / 100)
-                XCTAssertTrue((min(start, target)...max(start, target)).contains(current))
-                XCTAssertGreaterThanOrEqual((current - previous) * (target - start), 0)
-                previous = current
-            }
-        }
-        let closing = DuoHingeAnimation(start: 180, target: 0)
-        let visible = closing.angle(at: 0.4)
-        let retargeted = DuoHingeAnimation(start: visible, target: 120)
-        XCTAssertEqual(retargeted.angle(at: 0), visible, "Retargeting must not jump to the previous preset")
-    }
-
     @MainActor func testBezelArtworkDrawsEveryEdgeWithoutAnUnusedScreenAsset() async throws {
         let edge = NSImage(size: CGSize(width: 10, height: 10), flipped: true) { bounds in
             NSColor.red.setFill()
@@ -134,8 +109,8 @@ final class GeometryTests: XCTestCase {
 
     func testContinuousHingeAngleChoosesTheVisibleDuoPanel() {
         XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 0), .cover)
-        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 15), .cover)
-        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 15.1), .innerPartiallyOpen)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: DuoPose.coverRestAngle), .cover)
+        XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: DuoPose.innerRestAngle), .innerPartiallyOpen)
         XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 120), .innerPartiallyOpen)
         XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 179), .innerPartiallyOpen)
         XCTAssertEqual(DeviceDisplayMode.mode(forHingeAngle: 180), .innerFullyOpen)

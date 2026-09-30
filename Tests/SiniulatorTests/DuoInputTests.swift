@@ -39,8 +39,8 @@ final class DuoInputTests: XCTestCase {
     @MainActor func testFlatOptionDragRetainsRotationAndOverlayWithAndWithoutBezels() throws {
         let surface = try XCTUnwrap(IOSurfaceCreate([kIOSurfaceWidth: 256, kIOSurfaceHeight: 256,
             kIOSurfaceBytesPerElement: 4, kIOSurfaceBytesPerRow: 1024] as CFDictionary))
-        for type in ["iPhone-17-Pro", "iPhone-Duo"] { for bezels in [false, true] {
-            if type == "iPhone-Duo" && bezels { continue } // 3D path tested separately.
+        for bezels in [false, true] {
+            let type = "iPhone-17-Pro"
             let device = SimulatorDevice(udid: "flat-input-test", name: type, state: "Booted",
                 isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.\(type)",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
@@ -75,22 +75,22 @@ final class DuoInputTests: XCTestCase {
                 XCTAssertTrue(marker.isHidden)
                 XCTAssertTrue(screen.diagnosticContacts.isEmpty)
             }
-        } }
+        }
     }
 #endif
 
     @MainActor func testCameraStartsTurningEarlierAndKeepsTheInputHandoffAligned() {
-        XCTAssertEqual(DuoModelView.cameraOrbit(forHingeAngle: 40), 0)
-        XCTAssertLessThan(DuoModelView.cameraOrbit(forHingeAngle: 30), 0,
-            "At 150° closed the camera must already be turning")
-        XCTAssertEqual(DuoModelView.cameraOrbit(forHingeAngle: CGFloat(DeviceDisplayMode.coverHandoffAngle)), -.pi / 4,
+        XCTAssertEqual(DuoRenderPose(angle: DuoPose.innerRestAngle, quarterTurns: 0).cameraOrbit, 0)
+        XCTAssertEqual(DuoRenderPose(angle: 40, quarterTurns: 0).cameraOrbit, -.pi / 2)
+        XCTAssertEqual(DuoRenderPose(phase: 0.35, quarterTurns: 0).cameraOrbit, -.pi / 4,
             accuracy: 0.0001)
-        XCTAssertEqual(DuoModelView.cameraOrbit(forHingeAngle: 0), -.pi / 2, accuracy: 0.0001)
+        XCTAssertEqual(DuoRenderPose(angle: 0, quarterTurns: 0).cameraOrbit, -.pi / 2, accuracy: 0.0001)
         var previous: CGFloat = 0
-        for angle in stride(from: CGFloat(180), through: 0, by: -0.1) {
-            let orbit = DuoModelView.cameraOrbit(forHingeAngle: angle)
+        for phase in stride(from: 1.0, through: 0, by: -0.001) {
+            let angle = DuoPose.angle(at: phase)
+            let orbit = DuoRenderPose(angle: angle, quarterTurns: 0).cameraOrbit
             XCTAssertLessThanOrEqual(orbit, previous + 0.0001)
-            XCTAssertLessThan(abs(orbit - previous), 0.006, "No camera jump at the display handoff")
+            XCTAssertLessThan(abs(orbit - previous), 0.008, "Continuous eased camera orbit")
             previous = orbit
         }
     }
@@ -135,8 +135,8 @@ final class DuoInputTests: XCTestCase {
                     chrome: chrome, screen: screen)
                 let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(model.snapshot().tiffRepresentation)))
                 var samples = 0
-                for y in stride(from: 80, to: bitmap.pixelsHigh - 80, by: 65) {
-                    for x in stride(from: 80, to: bitmap.pixelsWide - 80, by: 65) {
+                for y in stride(from: 80, to: bitmap.pixelsHigh - 80, by: 32) {
+                    for x in stride(from: 80, to: bitmap.pixelsWide - 80, by: 32) {
                         // snapshot's bitmap already holds sRGB channel values.
                         // colorAt creates an NSCalibratedRGBColor; converting it
                         // again would reinterpret the encoded test coordinates.
@@ -230,13 +230,18 @@ final class DuoInputTests: XCTestCase {
                 let root = DevicePresentationView(screen: screen,
                     chrome: DeviceChrome.load(for: device, displayMode: mode), device: device) { _ in }
                 root.frame = CGRect(x: 0, y: 0, width: 800, height: 640)
+                // hitTest takes the parent's coordinates. A detached flipped
+                // root happened to work when the old viewport was centered;
+                // the cropped/top-anchored layout exposes that wrong fixture.
+                let parent = NSView(frame: root.frame)
+                parent.addSubview(root)
                 root.layoutSubtreeIfNeeded()
                 _ = root.canvas.duoSnapshot()
                 // Avoid the exact hinge seam, which is not screen geometry.
-                let point = CGPoint(x: screen.bounds.width * 0.6, y: screen.bounds.height * 0.4)
-                let hit = root.hitTest(root.convert(point, from: screen))
+                let point = try XCTUnwrap(screen.coordinateProjector?(CGPoint(x: 0.6, y: 0.4)))
+                let hit = root.hitTest(parent.convert(point, from: screen))
                 XCTAssertTrue(hit === screen,
-                    "Duo must deliver mouseDown/drag/up to the touchscreen, not \(String(describing: hit)); mode=\(mode), turn=\(turn)")
+                    "Duo must deliver mouseDown/drag/up to the touchscreen, not \(String(describing: hit)); mode=\(mode), turn=\(turn), point=\(root.convert(point, from: screen)), canvas=\(root.canvas.frame), hardware=\(root.visualDeviceRect)")
                 guard let mapped = screen.coordinateMapper?(point, false) else {
                     XCTFail("Missing screen hit: mode=\(mode), turn=\(turn)")
                     continue

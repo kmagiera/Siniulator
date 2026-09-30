@@ -16,6 +16,50 @@ private final class DisplayStub: SIDisplay {
 }
 
 final class DuoModelTests: XCTestCase {
+    @MainActor func testDepartingPanelSurvivesGuestClearingItsLiveSurface() throws {
+        let device = SimulatorDevice(udid: "duo-panel-handoff", name: "iPhone Duo", state: "Booted",
+            isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
+            runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
+        guard FileManager.default.fileExists(atPath: DuoModelView.assetURL.path) else {
+            throw XCTSkip("The iPhone Duo DeviceKit resources are not installed")
+        }
+        let inner = DeviceChrome.load(for: device, displayMode: .innerFullyOpen)
+        let cover = DeviceChrome.load(for: device, displayMode: .cover)
+        let screen = SimulatorScreenView(renderer: try ScreenRenderer())
+        let model = try XCTUnwrap(DuoModelView(screen: screen, chrome: inner))
+        model.frame = CGRect(x: 0, y: 0, width: 480, height: 480)
+        let display = DisplayStub()
+        let surface = try XCTUnwrap(IOSurfaceCreate([
+            kIOSurfaceWidth: 64, kIOSurfaceHeight: 64, kIOSurfaceBytesPerElement: 4,
+            kIOSurfaceBytesPerRow: 256, kIOSurfacePixelFormat: UInt32(0x42475241)
+        ] as CFDictionary))
+        func fill(_ pixel: UInt32) {
+            IOSurfaceLock(surface, [], nil)
+            IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: UInt32.self).update(repeating: pixel, count: 64 * 64)
+            IOSurfaceUnlock(surface, [], nil)
+        }
+        display.framebuffer = surface
+        fill(0xff0000ff)
+        model.requestPanel(cover: false, engine: screen.renderer.engine)
+        model.updateDisplay(display, engine: screen.renderer.engine, chrome: inner)
+        model.setHingeAngle(120, chrome: inner, screen: screen)
+        model.requestPanel(cover: true, engine: screen.renderer.engine)
+        fill(0xff000000)
+        // The same shared IOSurface now contains the shutdown frame. Neither
+        // the shared memory nor a late callback may black out the old material.
+        model.updateDisplay(display, engine: screen.renderer.engine, chrome: inner)
+        model.setDisplayChrome(cover)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(model.snapshot().tiffRepresentation)))
+        var blue = 0
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: 8) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: 8) {
+                let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+                if color.alphaComponent > 0.9 && color.blueComponent > 0.8 && color.redComponent < 0.1 { blue += 1 }
+            }
+        }
+        XCTAssertGreaterThan(blue, 100, "The inner screen must remain lit until the camera has turned away")
+    }
+
     @MainActor func testClosedCoverFacesTheCameraSquarelyInEveryOrientation() throws {
         let device = SimulatorDevice(udid: "duo-closed-cover", name: "iPhone Duo", state: "Booted",
             isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
@@ -27,7 +71,7 @@ final class DuoModelTests: XCTestCase {
         let chrome = DeviceChrome.load(for: device, displayMode: .cover)
         let screen = SimulatorScreenView(renderer: try ScreenRenderer())
         let model = try XCTUnwrap(DuoModelView(screen: screen, chrome: chrome))
-        model.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        model.frame = CGRect(x: 0, y: 0, width: 640, height: 640)
         let display = DisplayStub()
         let surface = try XCTUnwrap(IOSurfaceCreate([
             kIOSurfaceWidth: 64, kIOSurfaceHeight: 64, kIOSurfaceBytesPerElement: 4,
@@ -116,7 +160,7 @@ final class DuoModelTests: XCTestCase {
             for y in stride(from: 0, to: bitmap.pixelsHigh, by: 8) {
                 for x in stride(from: 0, to: bitmap.pixelsWide, by: 8) {
                     let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
-                    samples += 1
+                    if color.alphaComponent > 0.9 { samples += 1 }
                     if color.alphaComponent > 0.9,
                        (red ? color.redComponent : color.blueComponent) > 0.8,
                        (red ? color.blueComponent : color.redComponent) < 0.1 { colored += 1 }
@@ -237,7 +281,7 @@ final class DuoModelTests: XCTestCase {
 
         XCTAssertFalse(screen.renderer.layer.isHidden)
         XCTAssertFalse(screen.frame.isEmpty)
-        XCTAssertEqual(root.canvas.duoProjectionSizeFractions, CGSize(width: 1, height: 1))
+        XCTAssertFalse(root.canvas.usesDuoModel)
         XCTAssertNil(screen.coordinateMapper)
     }
 
@@ -271,7 +315,7 @@ final class DuoModelTests: XCTestCase {
             guard let model = DuoModelView(screen: screen, chrome: chrome) else {
                 throw XCTSkip("The V68 model could not be loaded")
             }
-            model.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+            model.frame = CGRect(x: 0, y: 0, width: 640, height: 640)
             model.layoutSubtreeIfNeeded()
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
             guard let tiff = model.snapshot().tiffRepresentation,
@@ -295,12 +339,12 @@ final class DuoModelTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(bounds.minX, 4)
             XCTAssertGreaterThanOrEqual(bounds.minY, 4)
             XCTAssertLessThanOrEqual(bounds.maxX, 636)
-            XCTAssertLessThanOrEqual(bounds.maxY, 476)
+            XCTAssertLessThanOrEqual(bounds.maxY, 636)
             XCTAssertEqual(bounds.midX, 320, accuracy: 24,
                 "Every pose should stay centered as the camera changes sides")
         }
-        XCTAssertLessThanOrEqual(bookBounds.height, flatBounds.height + 2,
-            "Folding should move the hinge into depth, not make the device taller")
+        XCTAssertLessThan(bookBounds.height, flatBounds.height * 1.15,
+            "Fixed camera allows natural perspective, without refitting its scale")
         XCTAssertLessThan(bookBounds.width, flatBounds.width * 0.97,
             "The partially open pose must have visible perspective")
         XCTAssertLessThan(coverBounds.width, coverBounds.height * 0.85,
@@ -311,15 +355,15 @@ final class DuoModelTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(rotated.minX, 4)
             XCTAssertGreaterThanOrEqual(rotated.minY, 4)
             XCTAssertLessThanOrEqual(rotated.maxX, 636)
-            XCTAssertLessThanOrEqual(rotated.maxY, 476)
+            XCTAssertLessThanOrEqual(rotated.maxY, 636)
             XCTAssertEqual(rotated.midX, 320, accuracy: 24,
                 "The cover must stay centered after quarter turn \(turns)")
-            XCTAssertEqual(rotated.midY, 240, accuracy: 24,
+            XCTAssertEqual(rotated.midY, 320, accuracy: 24,
                 "The cover must stay centered after quarter turn \(turns)")
         }
     }
 
-    @MainActor func testFoldableToolbarTracksProjectedDeviceWidthSymmetrically() throws {
+    @MainActor func testFoldableToolbarKeepsFixedWidthAndGapInEveryPreset() throws {
         let device = SimulatorDevice(udid: "duo-toolbar-test", name: "iPhone Duo", state: "Booted",
             isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
             runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
@@ -338,18 +382,19 @@ final class DuoModelTests: XCTestCase {
             let control = try XCTUnwrap(root.controls.displayModeControl)
             let controlFrame = root.convert(control.bounds, from: control)
             return (root.controls.frame.width, root.controls.frame.midX, controlFrame.midX,
-                root.canvas.frame.minY - root.controls.frame.maxY)
+                root.visualDeviceRect.minY - root.controls.frame.maxY)
         }
 
         let cover = try geometry(.cover)
         let book = try geometry(.innerPartiallyOpen)
         let flat = try geometry(.innerFullyOpen)
-        XCTAssertLessThan(cover.width, book.width)
-        XCTAssertLessThan(book.width, flat.width)
+        XCTAssertGreaterThan(cover.width, 0)
+        XCTAssertEqual(book.width, cover.width)
+        XCTAssertEqual(flat.width, cover.width)
         for item in [cover, book, flat] {
             XCTAssertEqual(item.midX, 400, accuracy: 0.5)
             XCTAssertEqual(item.modeMidX, 400, accuracy: 0.5)
-            XCTAssertEqual(item.gap, 0, accuracy: 0.5)
+            XCTAssertEqual(item.gap, DuoStage.toolbarGap, accuracy: 0.5)
         }
     }
 
@@ -390,7 +435,7 @@ final class DuoModelTests: XCTestCase {
     }
 
 #if DEBUG
-    @MainActor func testResizeTargetsTrackTheVisibleFoldedHardwareInEveryOrientation() throws {
+    @MainActor func testHardwareCornerResizingMatchesRenderedCornersInEveryOrientation() throws {
         let device = SimulatorDevice(udid: "duo-resize-test", name: "iPhone Duo", state: "Booted",
             isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
             runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
@@ -409,7 +454,9 @@ final class DuoModelTests: XCTestCase {
                     root.frame = CGRect(origin: .zero, size: size)
                     root.layoutSubtreeIfNeeded()
                     // AppKit can ask for cursor rects before SceneKit's first draw.
-                    for corner in DeviceResizeCorner.allCases { _ = root.resizeTarget(for: corner) }
+                    let beforeDraw = Dictionary(uniqueKeysWithValues: DeviceResizeCorner.allCases.map {
+                        ($0, root.resizeTarget(for: $0))
+                    })
                     let image = try XCTUnwrap(root.canvas.duoSnapshot())
                     let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(image.tiffRepresentation)))
                     // Independently find the rendered pixel nearest each viewport
@@ -421,8 +468,10 @@ final class DuoModelTests: XCTestCase {
                         let pixel = try XCTUnwrap(rendered[corner])
                         let point = CGPoint(x: viewport.minX + pixel.x / CGFloat(bitmap.pixelsWide) * viewport.width,
                             y: viewport.minY + pixel.y / CGFloat(bitmap.pixelsHigh) * viewport.height)
+                        XCTAssertTrue(try XCTUnwrap(beforeDraw[corner]).contains(point),
+                            "The visible corner must already be interactive before SceneKit draws")
                         XCTAssertEqual(root.resizeCorner(at: point), corner,
-                            "Missing rendered \(corner) resize target for \(mode), turn \(turns), \(size); target \(root.resizeTarget(for: corner)), pixel \(point)")
+                            "Resize target must match rendered \(corner) for \(mode), turn \(turns)")
                     }
                 }
             }
@@ -431,13 +480,14 @@ final class DuoModelTests: XCTestCase {
 #endif
 
     private func renderedCorners(of bitmap: NSBitmapImageRep) -> [DeviceResizeCorner: CGPoint] {
+        let hardware = opaqueBounds(of: bitmap)
         var result: [DeviceResizeCorner: CGPoint] = [:]
         var distances: [DeviceResizeCorner: CGFloat] = [:]
         for y in 0..<bitmap.pixelsHigh {
             for x in 0..<bitmap.pixelsWide where (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.5 {
                 for corner in DeviceResizeCorner.allCases {
-                    let dx = CGFloat(corner.isLeft ? x : bitmap.pixelsWide - x)
-                    let dy = CGFloat(corner.isTop ? y : bitmap.pixelsHigh - y)
+                    let dx = corner.isLeft ? CGFloat(x) - hardware.minX : hardware.maxX - CGFloat(x)
+                    let dy = corner.isTop ? CGFloat(y) - hardware.minY : hardware.maxY - CGFloat(y)
                     let distance = dx * dx + dy * dy
                     if distance < (distances[corner] ?? .greatestFiniteMagnitude) {
                         distances[corner] = distance

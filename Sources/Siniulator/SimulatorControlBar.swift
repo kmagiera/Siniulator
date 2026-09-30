@@ -42,7 +42,7 @@ import AppKit
     func height(for width: CGFloat) -> CGFloat { metrics.layout(width: width).height }
     var minimumCompactWidth: CGFloat { metrics.minimumCompactWidth }
     var minimumExpandedWidth: CGFloat { metrics.minimumExpandedWidth }
-    var topInset: CGFloat = 0 { didSet { needsLayout = true } }
+    var topInset: CGFloat = 0 { didSet { if oldValue != topInset { needsLayout = true } } }
     var isAttachedToScreen = false {
         didSet {
             guard oldValue != isAttachedToScreen else { return }

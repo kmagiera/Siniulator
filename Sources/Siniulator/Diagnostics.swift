@@ -2,6 +2,10 @@
 import AppKit
 
 @MainActor enum Diagnostics {
+    /// The 2D chrome checks do not apply to foldable viewports or bezel policy.
+    static func ordinaryPresentationDevices(in devices: [SimulatorDevice]) -> [SimulatorDevice] {
+        devices.filter { $0.isBooted && DeviceChrome.displayModes(for: $0).isEmpty }
+    }
     static func startupSmoke(app: AppDelegate) async {
         do {
             let expected = Set(app.store.devices.filter(\.isBooted).map(\.id))

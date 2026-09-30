@@ -87,4 +87,17 @@ final class DuoScreenHitMeshTests: XCTestCase {
             }
         } }
     }
+
+    @MainActor func testScreenEdgeToleranceIsBoundedInProjectedPoints() throws {
+        let mesh = try XCTUnwrap(DuoScreenHitMesh(node: SCNNode(geometry: quad())))
+        func nearEdge(_ x: CGFloat) -> CGPoint? {
+            mesh.nearestTextureCoordinate(to: CGPoint(x: x, y: 50),
+                project: { SCNVector3($0.x * 100, $0.y * 100, $0.z) },
+                unproject: { SCNVector3($0.x / 100, $0.y / 100, $0.z) }, maximumDistance: 0.25)
+        }
+        let edge = try XCTUnwrap(nearEdge(100.2))
+        XCTAssertEqual(edge.x, 1, accuracy: 0.0001)
+        XCTAssertEqual(edge.y, 0.5, accuracy: 0.0001)
+        XCTAssertNil(nearEdge(100.4), "A screen-edge precision guard must not swallow the bezel")
+    }
 }

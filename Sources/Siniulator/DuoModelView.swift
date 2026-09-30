@@ -7,51 +7,12 @@ import SimulatorBridge
 /// Renders Apple's DeviceKit model for the foldable simulator. The model is
 /// loaded at runtime from the selected Xcode, so Siniulator neither copies nor
 /// ships Apple's private artwork.
-@MainActor final class DuoModelView: SCNView, SCNSceneRendererDelegate {
-    private enum Animation {
-        // Pose times in V68.usdz's 37.5-second animation timeline. The
-        // `book_close` clip folds the inner display and turns the hardware;
-        // the camera completes that turn so its cover display faces forward.
-        static let innerOpen: TimeInterval = 10.833333333333334
-        static let innerPartiallyOpen: TimeInterval = 12.5
-        // Last closing keyframe: frame 380 at 24 fps. At 15.5 s the
-        // cover is still six degrees away from facing the camera squarely.
-        static let cover: TimeInterval = 380.0 / 24.0
-
-        static func time(for mode: DeviceDisplayMode) -> TimeInterval {
-            switch mode {
-            case .cover: cover
-            case .innerPartiallyOpen: innerPartiallyOpen
-            case .innerFullyOpen: innerOpen
-            }
-        }
-
-        static func time(forHingeAngle angle: CGFloat) -> TimeInterval {
-            let angle = min(180, max(0, angle))
-            return innerOpen + (cover - innerOpen) * (180 - angle) / 180
-        }
-
-        static func hingeAngle(at time: TimeInterval) -> CGFloat {
-            let progress = (time - innerOpen) / (cover - innerOpen)
-            return 180 * (1 - min(1, max(0, progress)))
-        }
-
-        static func cameraOrbit(at time: TimeInterval) -> CGFloat {
-            DuoModelView.cameraOrbit(forHingeAngle: hingeAngle(at: time))
-        }
-    }
-
+@MainActor final class DuoModelView: SCNView {
     private static let innerScreenName = "mQHVkATpIwJRVQx"
     private static let coverScreenName = "zaWsadDZpWAUDAX"
 
-    private struct PoseAnimation {
-        let node: SCNNode
-        let key: String
-        let animation: SCNAnimation
-    }
-
     private let content: SCNNode
-    private let poseAnimations: [PoseAnimation]
+    private let poseClip: DuoPoseClip
     private let cameraNode = SCNNode()
     private var innerScreen: SCNNode
     private var coverScreen: SCNNode
@@ -63,107 +24,54 @@ import SimulatorBridge
         let nativeQuarterTurns: Int
     }
     private var screenTextures: [ObjectIdentifier: ScreenTexture] = [:]
-    private var guestQuarterTurns = 0
+    private var requestedPanel: SCNNode?
+    private var frozenPanelTexture: MTLTexture?
     private var nativeQuarterTurns = 0
-    private var poseTime = Animation.innerOpen
-    private var cameraOrbit: CGFloat = 0
-    private var hasConfiguredPose = false
-    private var referenceModelSize = CGSize(width: 16, height: 11.5)
-    private(set) var projectedWidthFraction: CGFloat = 1
-    var onProjectionWidthChange: ((CGFloat) -> Void)?
-    private struct ResizePose: Equatable {
+    private var pose = DuoRenderPose(phase: 1, quarterTurns: 0)
+    private(set) var projectedHardwareBounds: CGRect = .zero
+    var maximumProjectedSpan: CGFloat { poseClip.maximumProjectedSpan }
+    var toolbarWidthFraction: CGFloat { poseClip.toolbarWidthFraction }
+    var anchorsHardwareToTop = false {
+        didSet { if oldValue != anchorsHardwareToTop { updateCamera() } }
+    }
+    private struct ProjectionState: Equatable {
         let size: CGSize
-        let time: TimeInterval
-        let turns: Int
+        let pose: DuoRenderPose
+        let anchored: Bool
     }
-    private var resizePose: ResizePose?
-    private var renderedResizePose: ResizePose?
+    private var projectionState: ProjectionState?
+    private var resizePose: ProjectionState?
     private var resizePoints: [DeviceResizeCorner: CGPoint] = [:]
-
-    /// Query the posed mesh, not its undeformed bounding box or the toolbar's
-    /// approximate width fraction. In particular the cover already occupies a
-    /// one-panel viewport and must not have its hit targets halved again.
-    var resizeCornerPoints: [DeviceResizeCorner: CGPoint] {
-        let pose = ResizePose(size: bounds.size, time: poseTime, turns: guestQuarterTurns)
-        if resizePose == pose { return resizePoints }
-        resizePoints = [:]
-        guard bounds.width > 1, bounds.height > 1 else { return resizePoints }
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        let options: [SCNHitTestOption: Any] = [
-            .rootNode: content, .ignoreHiddenNodes: true, .backFaceCulling: false,
-            .searchMode: SCNHitTestSearchMode.any.rawValue
-        ]
-        func contains(_ point: CGPoint) -> Bool { !hitTest(point, options: options).isEmpty }
-        guard contains(center) else { return resizePoints }
-        for corner in DeviceResizeCorner.allCases {
-            // SCNView uses bottom-left coordinates; callers convert these into
-            // the flipped presentation view before installing cursor rects.
-            let vertex = CGPoint(x: corner.isLeft ? bounds.minX : bounds.maxX,
-                y: corner.isTop ? bounds.maxY : bounds.minY)
-            func boundary(at angle: CGFloat) -> CGPoint {
-                let dx = cos(angle) * (corner.isLeft ? -1 : 1)
-                let dy = sin(angle) * (corner.isTop ? 1 : -1)
-                let radius = min(bounds.width / 2 / max(0.0001, abs(dx)),
-                    bounds.height / 2 / max(0.0001, abs(dy)))
-                var low: CGFloat = 0, high = radius
-                while high - low > 0.5 {
-                    let mid = (low + high) / 2
-                    if contains(CGPoint(x: center.x + dx * mid, y: center.y + dy * mid)) { low = mid }
-                    else { high = mid }
-                }
-                return CGPoint(x: center.x + dx * low, y: center.y + dy * low)
-            }
-            func distance(_ point: CGPoint) -> CGFloat {
-                hypot(point.x - vertex.x, point.y - vertex.y)
-            }
-            var bestAngle: CGFloat = 0
-            var best = boundary(at: 0)
-            let step = CGFloat.pi / 16
-            for index in 1...8 {
-                let angle = CGFloat(index) * step
-                let point = boundary(at: angle)
-                if distance(point) < distance(best) { best = point; bestAngle = angle }
-            }
-            var span = step
-            for _ in 0..<5 {
-                span /= 2
-                for angle in [max(0, bestAngle - span), min(.pi / 2, bestAngle + span)] {
-                    let point = boundary(at: angle)
-                    if distance(point) < distance(best) { best = point; bestAngle = angle }
-                }
-            }
-            resizePoints[corner] = best
-        }
-        resizePose = pose
-        return resizePoints
+#if DEBUG
+    private(set) var cameraUpdateCount = 0
+    func snapshotCurrentPose() -> NSImage {
+        // A hidden SCNView can return the previous skinned frame on its first
+        // snapshot after a pose change. Prime that offscreen renderer before
+        // capturing evidence. This is never part of the production frame loop.
+        SCNTransaction.flush()
+        _ = snapshot()
+        return snapshot()
     }
+#endif
 
-    nonisolated func renderer(_ renderer: any SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let pose = ResizePose(size: bounds.size, time: poseTime, turns: guestQuarterTurns)
-            guard renderedResizePose != pose else { return }
-            renderedResizePose = pose
-            // Cursor queries may precede SceneKit's presentation of this pose.
-            // Retry once it has drawn, and never cache an empty pre-draw hit.
-            resizePose = nil
-            if let window, let root = window.contentView { window.invalidateCursorRects(for: root) }
-        }
+    /// Corner targets use the cached authored silhouette, not asynchronous
+    /// SceneKit hit tests or an approximation derived from toolbar width.
+    var resizeCornerPoints: [DeviceResizeCorner: CGPoint] {
+        if resizePose == projectionState { return resizePoints }
+        resizePoints = [:]
+        guard bounds.width > 1, bounds.height > 1,
+              let corners = poseClip.projectedCorners(angle: pose.angle, quarterTurns: pose.quarterTurns, side: bounds.width),
+              let envelope = poseClip.projectedBounds(angle: pose.angle, quarterTurns: pose.quarterTurns, side: bounds.width)
+        else { return resizePoints }
+        let dx = projectedHardwareBounds.minX - envelope.minX
+        let dy = projectedHardwareBounds.minY - envelope.minY
+        resizePoints = corners.mapValues { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        resizePose = projectionState
+        return resizePoints
     }
 
     static var assetURL: URL {
         DeviceKitResources.duoModelURL
-    }
-
-    nonisolated static func cameraOrbit(forHingeAngle angle: CGFloat) -> CGFloat {
-        // Start at 140° closed (40° open), so the cover is coming into view
-        // before the runtime dims the inner panel. Keep the camera's midpoint
-        // aligned with the existing digitizer/haptic handoff at 15° open.
-        let handoff = CGFloat(DeviceDisplayMode.coverHandoffAngle)
-        let progress = angle > handoff
-            ? max(0, (40 - angle) / (40 - handoff))
-            : 1 + min(1, max(0, (handoff - angle) / handoff))
-        return -.pi / 4 * progress
     }
 
     init?(screen: SimulatorScreenView, chrome: DeviceChrome) {
@@ -184,7 +92,11 @@ import SimulatorBridge
         coverScreen = cover
         activeScreen = mode == .cover ? cover : inner
         content = loaded.rootNode
-        poseAnimations = Self.takePoseAnimations(from: loaded.rootNode)
+        guard let clip = DuoPoseClip(root: loaded.rootNode) else { return nil }
+        // Unsupported model schemas retain the ordinary framebuffer fallback;
+        // there is no second, renderer-ray-tested geometry implementation.
+        guard clip.projectedBounds(angle: 180, quarterTurns: 0, side: 1) != nil else { return nil }
+        poseClip = clip
         super.init(frame: .zero, options: [
             SCNView.Option.preferredRenderingAPI.rawValue: SCNRenderingAPI.metal.rawValue
         ])
@@ -193,12 +105,12 @@ import SimulatorBridge
         scene.rootNode.addChildNode(cameraNode)
         installLighting(in: scene)
         self.scene = scene
-        delegate = self
 
         let camera = SCNCamera()
-        camera.fieldOfView = 31
-        camera.zNear = 0.01
-        camera.zFar = 200
+        camera.fieldOfView = DuoStage.fieldOfView
+        camera.projectionDirection = .vertical
+        camera.zNear = Double(DuoStage.nearPlane)
+        camera.zFar = Double(DuoStage.farPlane)
         // The simulator IOSurface already contains display-referred sRGB.
         // HDR tone mapping here lifts blacks and desaturates the guest image.
         camera.wantsHDR = false
@@ -212,16 +124,13 @@ import SimulatorBridge
         antialiasingMode = .multisampling4X
         allowsCameraControl = false
         rendersContinuously = true
-        preferredFramesPerSecond = 30
+        preferredFramesPerSecond = 60
         isPlaying = false
         loops = false
 
         prepareScreen(innerScreen)
         prepareScreen(coverScreen)
-        applyPose(at: Animation.innerOpen)
-        SCNTransaction.flush()
-        captureReferenceModelSize()
-        configure(chrome: chrome, screen: screen)
+        setRenderedPose(DuoRenderPose(angle: CGFloat(mode.hingeAngle), quarterTurns: CGFloat(screen.quarterTurns)), chrome: chrome)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
@@ -236,17 +145,25 @@ import SimulatorBridge
             .backFaceCulling: false, .searchMode: SCNHitTestSearchMode.any.rawValue]).isEmpty
     }
 
-    func configure(chrome: DeviceChrome, screen: SimulatorScreenView) {
-        guard let nextMode = chrome.displayMode else { return }
-        guestQuarterTurns = screen.quarterTurns
+    func containsResizeFrame(at point: CGPoint) -> Bool {
+        guard bounds.contains(point) else { return false }
+        guard let envelope = poseClip.projectedBounds(angle: pose.angle, quarterTurns: pose.quarterTurns, side: bounds.width) else { return false }
+        let rawPoint = CGPoint(x: point.x - projectedHardwareBounds.minX + envelope.minX,
+            y: point.y - projectedHardwareBounds.minY + envelope.minY)
+        guard let distance = poseClip.distanceToOutline(at: rawPoint, angle: pose.angle,
+            quarterTurns: pose.quarterTurns, side: bounds.width), distance <= 5 else { return false }
+        // Never intercept a touch on the posed screen, including its rounded
+        // corners. The outline tolerance is only for the bezel/outside edge.
+        if normalizedScreenPoint(at: point, clamped: false) != nil { return false }
+        // A ray exactly on a rounded triangle edge can miss by a fraction of a
+        // pixel after project/unproject. Do not turn that visible screen edge
+        // into a resize handle. Only corner candidates use this extra check.
+        return activeHitMesh?.nearestTextureCoordinate(to: point, project: { projectPoint($0) },
+            unproject: { unprojectPoint($0) }, maximumDistance: 0.25) == nil
+    }
+
+    func setDisplayChrome(_ chrome: DeviceChrome) {
         nativeQuarterTurns = chrome.nativeQuarterTurns
-        if !hasConfiguredPose {
-            hasConfiguredPose = true
-            setPose(time: Animation.time(for: nextMode))
-        } else {
-            updateCamera()
-            needsDisplay = true
-        }
     }
 
     func updateDisplay(_ display: SIDisplay?, engine: MetalScreenEngine, chrome: DeviceChrome) {
@@ -255,11 +172,13 @@ import SimulatorBridge
         guard let display else {
             // A disconnect must not leave a live-looking image on either panel.
             screenTextures.removeAll()
+            frozenPanelTexture = nil
             for node in [innerScreen, coverScreen] {
                 for material in node.geometry?.materials ?? [] { material.diffuse.contents = nil }
             }
             return
         }
+        if let requestedPanel, target !== requestedPanel { return }
         // An inactive panel can temporarily have no surface. Keep its last
         // texture, and never clear the other panel while waiting for damage.
         guard let surface = display.surface as? IOSurface else { return }
@@ -283,8 +202,41 @@ import SimulatorBridge
         needsDisplay = true
     }
 
+    /// The guest clears its inactive IOSurface. Detach the departing material
+    /// before sending HID, keeping its own pixels visible through the turn.
+    /// This bounded CPU copy happens only at a panel handoff, never per frame.
+    func requestPanel(cover: Bool, engine: MetalScreenEngine) {
+        let next = cover ? coverScreen : innerScreen
+        let previous = requestedPanel ?? activeScreen
+        guard previous !== next else { requestedPanel = next; return }
+        if let frame = screenTextures[ObjectIdentifier(previous)] {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: frame.texture.pixelFormat,
+                width: frame.texture.width, height: frame.texture.height, mipmapped: false)
+            descriptor.storageMode = .shared
+            descriptor.usage = .shaderRead
+            if let snapshot = engine.device.makeTexture(descriptor: descriptor) {
+                IOSurfaceLock(frame.surface, .readOnly, nil)
+                snapshot.replace(region: MTLRegionMake2D(0, 0, frame.texture.width, frame.texture.height), mipmapLevel: 0,
+                    withBytes: IOSurfaceGetBaseAddress(frame.surface), bytesPerRow: frame.surface.bytesPerRow)
+                IOSurfaceUnlock(frame.surface, .readOnly, nil)
+                frozenPanelTexture = snapshot
+                for material in previous.geometry?.materials ?? [] { material.diffuse.contents = snapshot }
+            }
+        }
+        requestedPanel = next
+        // Force the first incoming damage callback to restore the live texture,
+        // even when CoreSimulator reuses the same IOSurface object.
+        screenTextures[ObjectIdentifier(next)] = nil
+    }
+
     override func layout() {
         super.layout()
+        updateCamera()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        guard frame.size != newSize else { return }
+        super.setFrameSize(newSize)
         updateCamera()
     }
 
@@ -343,37 +295,22 @@ import SimulatorBridge
     }
 
     func setHingeAngle(_ angle: CGFloat, chrome: DeviceChrome, screen: SimulatorScreenView) {
-        guard chrome.displayMode != nil else { return }
-        guestQuarterTurns = screen.quarterTurns
-        nativeQuarterTurns = chrome.nativeQuarterTurns
-        hasConfiguredPose = true
-        setPose(time: Animation.time(forHingeAngle: angle))
+        setRenderedPose(DuoRenderPose(angle: angle, quarterTurns: CGFloat(screen.quarterTurns)), chrome: chrome)
     }
 
-    private static func takePoseAnimations(from content: SCNNode) -> [PoseAnimation] {
-        var result: [PoseAnimation] = []
-        for node in [content] + descendants(of: content) {
-            for key in node.animationKeys {
-                guard let player = node.animationPlayer(forKey: key) else { continue }
-                player.animation.repeatCount = 0
-                player.animation.isRemovedOnCompletion = false
-                player.animation.usesSceneTimeBase = false
-                result.append(PoseAnimation(node: node, key: key, animation: player.animation))
-                node.removeAnimation(forKey: key, blendOutDuration: 0)
-            }
-        }
-        return result
-    }
-
-    private func applyPose(at time: TimeInterval) {
-        for pose in poseAnimations {
-            pose.node.removeAnimation(forKey: pose.key, blendOutDuration: 0)
-            pose.animation.timeOffset = time
-            let player = SCNAnimationPlayer(animation: pose.animation)
-            player.speed = 0
-            pose.node.addAnimationPlayer(player, forKey: pose.key)
-            player.play()
-        }
+    func setRenderedPose(_ pose: DuoRenderPose, chrome: DeviceChrome) {
+        setDisplayChrome(chrome)
+        guard self.pose != pose else { return }
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        SCNTransaction.animationDuration = 0
+        if self.pose.angle != pose.angle { poseClip.apply(angle: pose.angle) }
+        self.pose = pose
+        activeScreen = DeviceDisplayMode.mode(forHingeAngle: Double(pose.angle)) == .cover ? coverScreen : innerScreen
+        // Both panels stay textured; depth occlusion handles the visible handoff.
+        updateCamera()
+        SCNTransaction.commit()
+        needsDisplay = true
     }
 
     private static func textureTransform(quarterTurns: Int) -> SCNMatrix4 {
@@ -398,118 +335,50 @@ import SimulatorBridge
         }
     }
 
-    private func setPose(time: TimeInterval) {
-        poseTime = time
-        cameraOrbit = Animation.cameraOrbit(at: time)
-        applyPose(at: time)
-        activeScreen = DeviceDisplayMode.mode(forHingeAngle: Double(Animation.hingeAngle(at: time))) == .cover
-            ? coverScreen : innerScreen
-        // Both panels stay textured during the camera orbit. The hardware's
-        // depth occlusion replaces a hard visibility switch at 15 degrees.
-        projectedWidthFraction = max(
-            sin(Animation.hingeAngle(at: time) * .pi / 360),
-            abs(cameraOrbit) / .pi)
-        onProjectionWidthChange?(projectedWidthFraction)
-        SCNTransaction.flush()
-        updateCamera()
-        needsDisplay = true
-    }
-
-    private func captureReferenceModelSize() {
-        let points = modelPoints()
-        guard !points.isEmpty else { return }
-        let modelRight = SCNVector3(1, 0, 0)
-        let modelUp = SCNVector3(0, 0, -1)
-        func length(along axis: SCNVector3) -> CGFloat {
-            let values = points.map { Self.dot($0, axis) }
-            return max(0.1, values.max()! - values.min()!)
-        }
-        referenceModelSize = CGSize(width: length(along: modelRight), height: length(along: modelUp))
-    }
-
     private func updateCamera() {
-        guard bounds.width > 1, bounds.height > 1 else { return }
-        SCNTransaction.flush()
-        let points = modelPoints()
-        guard !points.isEmpty else { return }
-
-        let direction = SCNVector3(sin(cameraOrbit), cos(cameraOrbit), 0)
+        guard bounds.width > 1, bounds.width == bounds.height else { return }
+        let state = ProjectionState(size: bounds.size, pose: pose, anchored: anchorsHardwareToTop)
+        guard projectionState != state else { return }
+        projectionState = state
+#if DEBUG
+        cameraUpdateCount += 1
+#endif
+        let direction = SCNVector3(sin(pose.cameraOrbit), cos(pose.cameraOrbit), 0)
         let modelUp = SCNVector3(0, 0, -1)
         let viewRight = Self.cross(modelUp, direction)
-        let right: SCNVector3
-        let up: SCNVector3
-        switch ScreenGeometry.normalizedQuarterTurns(guestQuarterTurns) {
-        case 1: right = modelUp; up = Self.negated(viewRight)
-        case 2: right = Self.negated(viewRight); up = Self.negated(modelUp)
-        case 3: right = Self.negated(modelUp); up = viewRight
-        default: right = viewRight; up = modelUp
-        }
-
-        func range(along axis: SCNVector3) -> (min: CGFloat, max: CGFloat) {
-            let values = points.map { Self.dot($0, axis) }
-            return (values.min()!, values.max()!)
-        }
-        let horizontalRange = range(along: right)
-        let verticalRange = range(along: up)
-        let depthRange = range(along: direction)
-        var center = Self.add(
-            Self.add(Self.scaled(right, (horizontalRange.min + horizontalRange.max) / 2),
-                     Self.scaled(up, (verticalRange.min + verticalRange.max) / 2)),
-            Self.scaled(direction, (depthRange.min + depthRange.max) / 2))
-        let orbitProgress = min(1, abs(cameraOrbit) / (.pi / 2))
-        // The USD skinning bounds remain centered on the unfolded mesh. As the
-        // camera reaches the cover side, follow the physical half-panel away
-        // from the hinge so the closed phone stays centered in the viewport.
-        // Follow the physical cover half in model space. Applying this offset
-        // along the view's right axis made the closed phone drift in the same
-        // screen direction after every quarter turn (and almost leave the view
-        // upside down) instead of rotating the correction with the hardware.
-        center = Self.add(center, SCNVector3(0, referenceModelSize.width * 0.28 * orbitProgress, 0))
-        let turns = ScreenGeometry.normalizedQuarterTurns(guestQuarterTurns)
-        // While viewing the inner display, retain the fully-open framing so the
-        // fold recedes in depth without growing taller. Once the camera orbits
-        // to the cover, blend toward the actual one-panel projected width.
-        let framingWidth = referenceModelSize.width
-            * (1 - orbitProgress * (1 - projectedWidthFraction))
-        let horizontal = turns.isMultiple(of: 2) ? framingWidth : referenceModelSize.height
-        let vertical = turns.isMultiple(of: 2) ? referenceModelSize.height : framingWidth
-        let aspect = max(0.1, self.bounds.width / self.bounds.height)
-        let halfFOV = CGFloat((cameraNode.camera?.fieldOfView ?? 31) * .pi / 360)
-        // Keep only a small antialiasing guard around the hardware. The old
-        // six-percent camera padding stacked with the layout margin and left a
-        // conspicuous empty strip below the toolbar.
-        let cameraPadding = 1.034 + 0.066 * orbitProgress
-        let distance = max(vertical / 2, horizontal / (2 * aspect)) / tan(halfFOV) * cameraPadding
-        let fold = (180 - Animation.hingeAngle(at: poseTime)) * .pi / 360
-        let expectedDepth = referenceModelSize.width / 4 * sin(fold)
-        // SceneKit reports the undeformed mesh depth here, so using that bound
-        // would treat the closed phone's original full width as camera depth.
-        // The fold angle is the reliable source for the deformed near edge.
-        let depth = expectedDepth * 2 * (1 - orbitProgress)
-        cameraNode.position = Self.add(center, Self.scaled(direction, distance + depth))
+        let rotation = pose.quarterTurns * .pi / 2
+        let up = Self.add(Self.scaled(modelUp, cos(rotation)), Self.scaled(viewRight, -sin(rotation)))
+        let center = SCNVector3(poseClip.center.x, poseClip.center.y, poseClip.center.z)
+        let halfFOV = DuoStage.halfFieldOfView
+        // Scale the fixed projection, not its camera distance. The enclosing
+        // window is cropped to the current pose and is never a camera input.
+        let limitingFOV = atan(tan(halfFOV) * DuoStage.cameraFitFraction)
+        let distance = CGFloat(poseClip.radius) / sin(limitingFOV)
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        cameraNode.position = Self.add(center, Self.scaled(direction, distance))
         cameraNode.look(at: center, up: up, localFront: SCNVector3(0, 0, -1))
-    }
-
-    /// Sample the undeformed model bounds in world space. Projecting these
-    /// points onto the camera basis gives deterministic framing; the skinned
-    /// half-panel poses receive analytic depth and centering corrections.
-    private func modelPoints() -> [SCNVector3] {
-        var points: [SCNVector3] = []
-        for node in Self.descendants(of: content) where node.geometry != nil {
-            let box = node.boundingBox
-            for x in [box.min.x, box.max.x] {
-                for y in [box.min.y, box.max.y] {
-                    for z in [box.min.z, box.max.z] {
-                        points.append(node.convertPosition(SCNVector3(x, y, z), to: nil))
-                    }
-                }
-            }
+        projectedHardwareBounds = poseClip.projectedBounds(angle: pose.angle, quarterTurns: pose.quarterTurns, side: bounds.width) ?? .zero
+        // Translate the *projection* in the same SceneKit transaction as the
+        // skeleton. Moving the NSView separately could present a new offset
+        // over an older Metal frame, making the top edge wobble. Neither lens
+        // distance nor model scale changes while folding/rolling.
+        var offset = CGPoint.zero
+        if anchorsHardwareToTop {
+            offset = CGPoint(x: bounds.midX - projectedHardwareBounds.midX,
+                y: bounds.maxY - DuoStage.projectionTopInset - projectedHardwareBounds.maxY)
+            projectedHardwareBounds = projectedHardwareBounds.offsetBy(dx: offset.x, dy: offset.y)
         }
-        return points
-    }
-
-    private static func dot(_ lhs: SCNVector3, _ rhs: SCNVector3) -> CGFloat {
-        lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z
+        let near = DuoStage.nearPlane, far = DuoStage.farPlane
+        let y = Float(1 / tan(halfFOV))
+        let projection = simd_float4x4(columns: (
+            SIMD4(y, 0, 0, 0), SIMD4(0, y, 0, 0),
+            SIMD4(0, 0, -(far + near) / (far - near), -1),
+            SIMD4(0, 0, -2 * far * near / (far - near), 0)))
+        var translation = matrix_identity_float4x4
+        translation.columns.3 = SIMD4(Float(offset.x * 2 / bounds.width), Float(offset.y * 2 / bounds.height), 0, 1)
+        cameraNode.camera?.projectionTransform = SCNMatrix4(translation * projection)
+        SCNTransaction.commit()
     }
 
     private static func cross(_ lhs: SCNVector3, _ rhs: SCNVector3) -> SCNVector3 {
@@ -524,10 +393,6 @@ import SimulatorBridge
 
     private static func add(_ lhs: SCNVector3, _ rhs: SCNVector3) -> SCNVector3 {
         SCNVector3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z)
-    }
-
-    private static func negated(_ vector: SCNVector3) -> SCNVector3 {
-        SCNVector3(-vector.x, -vector.y, -vector.z)
     }
 
     private static func descendants(of root: SCNNode) -> [SCNNode] {
