@@ -43,9 +43,14 @@ import simd
                     case "scale": property = .scale
                     default: continue
                     }
-                    let times = (animation.keyTimes?.map(\.doubleValue)
-                        ?? values.indices.map { Double($0) / Double(max(1, values.count - 1)) })
-                        .map { animation.beginTime + $0 * animation.duration }
+                    let keyTimes: [Double]
+                    if let authoredTimes = animation.keyTimes {
+                        keyTimes = authoredTimes.map { $0.doubleValue }
+                    } else {
+                        let intervals = Double(max(1, values.count - 1))
+                        keyTimes = values.indices.map { Double($0) / intervals }
+                    }
+                    let times: [Double] = keyTimes.map { animation.beginTime + $0 * animation.duration }
                     guard times.count == values.count else { continue }
                     tracks.append(Track(node: node, property: property, times: times,
                         values: values.map { value in

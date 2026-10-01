@@ -122,6 +122,7 @@ final class DuoStageTests: XCTestCase {
     }
 
     @MainActor func testProjectedEnvelopeCoversPixelsAndScalesLinearly() throws {
+        guard FileManager.default.fileExists(atPath: DuoModelView.assetURL.path) else { throw XCTSkip("Duo model not installed") }
         let device = SimulatorDevice(udid: "projected-envelope", name: "iPhone Duo", state: "Booted",
             isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
             runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
