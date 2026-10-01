@@ -58,8 +58,11 @@ plus Duo modes.
 
 AppKit positions standard window buttons relative to the whole window. An
 inset pill therefore needs a horizontal translation. The adapter captures
-native offsets after toolbar installation, keeps the existing parent/targets,
-and reconciles again after AppKit's deferred frame changes.
+native offsets after toolbar installation and keeps the existing parent/targets.
+It corrects frame-change and native-resize notifications synchronously, before
+AppKit can present buttons outside the pill (resize can reset a button without
+a view notification). A coalesced deferred reconciliation then accounts for the
+completed native layout and its group-hover region.
 
 AppKit caches the group-hover region separately from the button frames. The
 adapter translates that region using public tracking-area APIs while retaining
@@ -80,6 +83,8 @@ inset; there is no extra correction added to AppKit's trailing margin.
 - `NativeWindowChromeTests`: actual native parents, actions, hit testing and
   group-hover regions after deferred layout, compact transitions, fullscreen
   handoff, detach and idempotent reattachment. Also selection and capture state.
+  A no-yield regression test resets button frames to AppKit's window-relative
+  positions during Duo crops and requires correction before the next run loop.
   The fullscreen Duo regression checks each segment's hit target, native toolbar
   ownership, centering and identity across repeated fullscreen/normal handoffs.
 - `ControlBarTests`, `ResizeTests`, `PresentationTests`, `AppearanceTests`:
@@ -87,6 +92,9 @@ inset; there is no extra correction added to AppKit's trailing margin.
 - `DuoModelTests` / `scripts/check-duo.sh`: every pose and rotation, continuous
   folding, constant toolbar width, native controls inside the pill, corner resizing,
   framebuffer stability and Save/Copy Screen.
+- `DuoLiveTests` (opt-in): real CoreSimulator panels, presets, pinch retargeting
+  and rotations. Every production display-link sample checks traffic-light
+  positions before deferred reconciliation can hide a one-frame jump.
 - Run unit tests with both the current beta and an older Xcode without Duo.
   Finally check real fullscreen entry/exit and native clicks on an unlocked Mac;
   a synchronous geometry assertion alone is not sufficient.

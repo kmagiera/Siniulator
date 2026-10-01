@@ -31,6 +31,8 @@ final class DuoLiveTests: XCTestCase {
             guard condition() else { throw SimulatorError(message: "Timed out waiting for live Duo state; connected=\(controller.isConnected), angle=\(controller.diagnosticHingeAngle), motion=\(controller.diagnosticHingeAnimationInProgress)") }
         }
         try await waitUntil({ controller.isConnected }, timeout: 45)
+        let bar = controller.presentation.controls
+        let buttonOffsets = bar.windowButtons.map { bar.convert($0.bounds, from: $0).minX }
         let frame = window.frame
         let toolbar = controller.presentation.controls.frame
         let viewport = controller.presentation.canvas.frame
@@ -63,6 +65,13 @@ final class DuoLiveTests: XCTestCase {
         let samples = controller.diagnosticMotionFrames
         XCTAssertGreaterThan(samples.count, 240)
         for sample in samples {
+            // Inspect every production display-link callback before any queued
+            // reconciliation can hide a transient native button reset.
+            XCTAssertEqual(sample.trafficLights.count, 3)
+            for (button, offset) in zip(sample.trafficLights, buttonOffsets) {
+                XCTAssertEqual(button.minX, offset, accuracy: 0.5,
+                    "Traffic lights escaped the pill during a live window crop")
+            }
             XCTAssertEqual(sample.frame.midX, frame.midX, accuracy: 0.5, "The toolbar must not drift while a fold/roll changes the crop")
             XCTAssertEqual(sample.frame.maxY, frame.maxY, accuracy: 0.001)
             XCTAssertEqual(sample.toolbar.width, toolbar.width)
@@ -77,6 +86,7 @@ final class DuoLiveTests: XCTestCase {
         Live CoreSimulator Duo: \(id)
         Initial tightly fitted window: \(frame.size), fixed toolbar: \(toolbar.size)
         Display-link callbacks: \(samples.count)
+        Native traffic-light frame checks: \(samples.count)
         CPU pose update p95: \(costs[costs.count * 95 / 100] * 1000) ms
         Callback interval p95 (excluding idle gaps): \(intervals[intervals.count * 95 / 100] * 1000) ms
         Buttons, mid-turn reversal, 0.5 pinch range, 4 rotations: passed

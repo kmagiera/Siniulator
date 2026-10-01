@@ -300,6 +300,54 @@ final class NativeWindowChromeTests: XCTestCase {
         withExtendedLifetime(chrome) {}
     }
 
+    @MainActor func testDuoTrafficLightsStayInThePillBeforeTheNextRunLoop() throws {
+        _ = NSApplication.shared
+        let device = SimulatorDevice(udid: "duo-crop-traffic-lights", name: "iPhone Duo", state: "Booted", isAvailable: true,
+            deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
+            runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1")
+        guard DeviceChrome.displayModes(for: device) == DeviceDisplayMode.allCases else {
+            throw XCTSkip("The selected Xcode does not include the Duo device profile")
+        }
+        let window = NSWindow(contentRect: CGRect(x: 100, y: 100, width: 900, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let root = NativeChromeTestRoot()
+        window.contentView = root
+        let bar = SimulatorControlBar(device: device) { _ in }
+        root.addSubview(bar)
+        bar.attach(to: window)
+        let originals = bar.windowButtons
+        let parents = originals.map { $0.superview }
+        let offsets = originals.map { $0.convert($0.bounds, to: nil).minX }
+        window.orderFront(nil)
+        let frameView = try XCTUnwrap(root.superview)
+        for width: CGFloat in [900, 820, 700, 640, 700, 820, 900] {
+            window.setContentSize(CGSize(width: width, height: 700))
+            bar.frame = CGRect(x: (width - 600) / 2, y: 0, width: 600, height: bar.height(for: 600))
+            bar.needsLayout = true
+            bar.layoutSubtreeIfNeeded()
+            frameView.needsLayout = true
+            frameView.layoutSubtreeIfNeeded()
+            // Replay AppKit's independent reset to window-relative frames.
+            // Frame notifications must correct it before a frame can be drawn.
+            for (button, offset) in zip(originals, offsets) {
+                let parent = try XCTUnwrap(button.superview)
+                let nativeX = parent.convert(CGPoint(x: offset, y: 0), from: nil).x
+                button.setFrameOrigin(CGPoint(x: nativeX, y: button.frame.minY))
+            }
+            // No yield, window update or settling delay can repair this frame.
+            for index in originals.indices {
+                let button = bar.windowButtons[index]
+                XCTAssertTrue(button === originals[index])
+                XCTAssertTrue(button.superview === parents[index])
+                XCTAssertEqual(bar.convert(button.bounds, from: button).minX, offsets[index], accuracy: 0.5,
+                    "Traffic lights must not escape for one frame during a Duo crop (width=\(width))")
+            }
+            window.update()
+        }
+    }
+
     @MainActor func testFullscreenDuoSelectorUsesAnIndependentNativeToolbarControl() async throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 800),

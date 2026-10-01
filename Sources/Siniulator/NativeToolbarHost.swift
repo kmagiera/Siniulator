@@ -40,10 +40,21 @@ import Combine
         window.addTitlebarAccessoryViewController(trailingInset)
         for button in buttons {
             button.postsFrameChangedNotifications = true
-            observe(NSView.frameDidChangeNotification, object: button) { $0.scheduleReconcile() }
+            // AppKit can restore its window-relative frames independently of
+            // the pill layout. Correct them before that frame is presented.
+            observe(NSView.frameDidChangeNotification, object: button) {
+                $0.reconcile(updateTracking: false)
+                $0.scheduleReconcile()
+            }
         }
-        // Native tracking can be rebuilt independently of the button frames.
-        observe(NSWindow.didUpdateNotification, object: window) { $0.scheduleReconcile() }
+        // A native resize can also reset frames without individual view
+        // notifications. Tracking can be rebuilt independently of both.
+        for name in [NSWindow.didResizeNotification, NSWindow.didUpdateNotification] {
+            observe(name, object: window) {
+                $0.reconcile(updateTracking: false)
+                $0.scheduleReconcile()
+            }
+        }
     }
 
     private func observe(_ name: Notification.Name, object: AnyObject,
@@ -115,13 +126,13 @@ import Combine
             self.reconcile()
         }
     }
-    private func reconcile() {
+    private func reconcile(updateTracking: Bool = true) {
         guard !reconciling, let window, let bar else { return }
         reconciling = true
         defer { reconciling = false }
         guard bar.metrics.hasModes, !bar.isFullScreen, !window.styleMask.contains(.fullScreen) else {
             restoreButtonPositions()
-            restoreTracking()
+            if updateTracking { restoreTracking() }
             return
         }
         let buttons = buttons
@@ -133,7 +144,9 @@ import Combine
                 button.setFrameOrigin(CGPoint(x: x, y: button.frame.minY))
             }
         }
-        reconcileTracking(buttons)
+        // AppKit may still be rebuilding its native hover region while it
+        // posts frame changes. Repair position immediately, tracking afterwards.
+        if updateTracking { reconcileTracking(buttons) }
     }
     private func restoreButtonPositions() {
         guard bar?.metrics.hasModes == true, let window else { return }
