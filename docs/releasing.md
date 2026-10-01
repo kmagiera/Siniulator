@@ -98,11 +98,11 @@ App or fine-grained token that has Actions write access:
 Do not bump the source plist, create a tag, or create a draft release beforehand.
 On success, the workflow publishes:
 
-- `Siniulator-VERSION-BUILD.dmg`, `appcast.xml`, `release.json`, and
-  `SHA256SUMS` as assets of the immutable GitHub Release;
+- `Siniulator-VERSION-BUILD.dmg`, `appcast.xml`, and `SHA256SUMS` as assets of
+  the immutable GitHub Release;
 - an attestation for the DMG; and
-- an Actions artifact named `appcast` containing `appcast.xml`, `release.json`,
-  and `SHA256SUMS`, retained for 90 days.
+- an Actions artifact named `appcast` containing `appcast.xml` and `SHA256SUMS`,
+  retained for 90 days.
 
 ## Updating `updates.siniulator.app`
 
@@ -119,8 +119,7 @@ Have the worker refresh after a successful publishing run (`publish=true`) or a
 served `/appcast.xml` atomically. Test builds deliberately use a different
 artifact name and cannot be mistaken for worker input. The appcast already links
 to the versioned DMG on GitHub, so the worker does not need to copy or proxy the
-binary. `release.json` contains the exact `dmgUrl` and can also drive a redirect
-from the existing `/Siniulator.dmg` download URL.
+binary.
 
 If the worker deliberately consumes Actions artifacts instead, select the
 artifact named `appcast` from the latest successful run of `release.yml` and

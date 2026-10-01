@@ -178,7 +178,6 @@ jobs:
         id: assets
         env:
           ARCHIVE_NAME: ${{ steps.metadata.outputs.archive_name }}
-          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
         run: |
           set -euo pipefail
           assets="$RUNNER_TEMP/release-assets"
@@ -186,14 +185,6 @@ jobs:
           cp "build/release/updates/$ARCHIVE_NAME" "$assets/$ARCHIVE_NAME"
           cp build/release/updates/appcast.xml "$assets/appcast.xml"
           (cd "$assets" && shasum -a 256 "$ARCHIVE_NAME" > SHA256SUMS)
-          jq -n \
-            --arg version "$RELEASE_VERSION" \
-            --arg buildNumber "$BUILD_NUMBER" \
-            --arg tag "$RELEASE_TAG" \
-            --arg releaseUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
-            --arg dmgUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$ARCHIVE_NAME" \
-            '{version: $version, buildNumber: $buildNumber, tag: $tag, releaseUrl: $releaseUrl, dmgUrl: $dmgUrl}' \
-            > "$assets/release.json"
           echo "directory=$assets" >> "$GITHUB_OUTPUT"
 
       - name: Attest the DMG build provenance
@@ -208,7 +199,6 @@ jobs:
           name: appcast
           path: |
             ${{ steps.assets.outputs.directory }}/appcast.xml
-            ${{ steps.assets.outputs.directory }}/release.json
             ${{ steps.assets.outputs.directory }}/SHA256SUMS
           if-no-files-found: error
           retention-days: 90
@@ -236,8 +226,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             "$ASSETS_DIRECTORY/$ARCHIVE_NAME" \
             "$ASSETS_DIRECTORY/appcast.xml" \
-            "$ASSETS_DIRECTORY/release.json" \
-            "$ASSETS_DIRECTORY/SHA256SUMS" \
+            "$ASSETS_DIRECTORY/SHA256SUMS#SHA-256 checksum" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Siniulator $RELEASE_VERSION" \
