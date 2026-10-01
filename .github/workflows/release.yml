@@ -234,10 +234,10 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$RELEASE_TAG" \
-            "$ASSETS_DIRECTORY/$ARCHIVE_NAME#Apple silicon notarized macOS DMG" \
-            "$ASSETS_DIRECTORY/appcast.xml#Signed Sparkle appcast" \
-            "$ASSETS_DIRECTORY/release.json#Machine-readable release metadata" \
-            "$ASSETS_DIRECTORY/SHA256SUMS#SHA-256 checksum" \
+            "$ASSETS_DIRECTORY/$ARCHIVE_NAME" \
+            "$ASSETS_DIRECTORY/appcast.xml" \
+            "$ASSETS_DIRECTORY/release.json" \
+            "$ASSETS_DIRECTORY/SHA256SUMS" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Siniulator $RELEASE_VERSION" \
