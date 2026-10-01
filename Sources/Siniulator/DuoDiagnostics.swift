@@ -8,9 +8,11 @@ extension Diagnostics {
         var savedFrame: CGRect?
         var savedTurns = 0
         var savedAngle = 180.0
+        var savedViewport: CGFloat = DuoStage.viewport
 
         func restore() async {
             guard let target = controller, let window = target.window, let frame = savedFrame else { return }
+            target.presentation.duoViewportSide = savedViewport
             target.diagnosticSetHingeAngle(savedAngle)
             for _ in 0..<500 {
                 if !target.diagnosticDisplaySwitchInProgress { break }
@@ -19,7 +21,7 @@ extension Diagnostics {
             if target.screen.quarterTurns != savedTurns {
                 target.perform(orientationCommand(for: savedTurns))
                 for _ in 0..<100 {
-                    if target.screen.quarterTurns == savedTurns { break }
+                    if target.screen.quarterTurns == savedTurns, !target.diagnosticHingeAnimationInProgress { break }
                     try? await Task.sleep(for: .milliseconds(50))
                 }
             }
@@ -33,6 +35,7 @@ extension Diagnostics {
             UserDefaults.standard.set(mode.rawValue, forKey: "display-mode-\(target.deviceInfo.id)")
             UserDefaults.standard.set(savedAngle, forKey: "hinge-angle-\(target.deviceInfo.id)")
             UserDefaults.standard.set(savedTurns, forKey: "orientation-\(target.deviceInfo.id)")
+            UserDefaults.standard.set(savedViewport, forKey: "duo-viewport-\(target.deviceInfo.id)")
         }
 
         do {
@@ -59,14 +62,14 @@ extension Diagnostics {
             savedFrame = window.frame
             savedTurns = target.screen.quarterTurns
             savedAngle = target.diagnosticHingeAngle
+            savedViewport = target.presentation.duoViewportSide
 
             func assertStableWindow(_ expected: CGRect, context: String) throws {
                 let actual = window.frame
-                guard abs(actual.minX - expected.minX) <= 0.5,
-                      abs(actual.minY - expected.minY) <= 0.5,
-                      abs(actual.width - expected.width) <= 0.5,
-                      abs(actual.height - expected.height) <= 0.5 else {
-                    throw SimulatorError(message: "Duo changed its window during \(context): \(expected) -> \(actual).")
+                guard abs(actual.midX - expected.midX) <= 0.5,
+                      abs(actual.maxY - expected.maxY) <= 0.5,
+                      target.presentation.duoViewportSide == savedViewport else {
+                    throw SimulatorError(message: "Duo changed its toolbar anchor or scale during \(context): \(expected) -> \(actual).")
                 }
             }
 
@@ -82,19 +85,19 @@ extension Diagnostics {
                 }
                 target.presentation.layoutSubtreeIfNeeded()
                 target.presentation.controls.layoutSubtreeIfNeeded()
-                let canvas = target.presentation.canvas
                 guard !target.diagnosticShowsConnectionOverlay else {
                     throw SimulatorError(message: "Duo showed the Starting overlay during \(context).")
                 }
-                guard abs(canvas.frame.minY - controls.frame.maxY) <= 0.5 else {
-                    throw SimulatorError(message: "Duo toolbar gap is \(canvas.frame.minY - controls.frame.maxY) points during \(context).")
+                let gap = target.presentation.visualDeviceRect.minY - controls.frame.maxY
+                guard abs(gap - DuoStage.toolbarGap) <= 0.5 else {
+                    throw SimulatorError(message: "Duo toolbar gap is \(gap) points during \(context).")
                 }
                 guard let selector = controls.displayModeControl,
                       abs(controls.convert(selector.bounds, from: selector).midX - controls.bounds.midX) <= 1 else {
                     throw SimulatorError(message: "Duo mode controls are not centered during \(context).")
                 }
                 guard selector.selectedSegment == DeviceDisplayMode.selectedMode(
-                    forHingeAngle: target.diagnosticHingeAngle).rawValue else {
+                    forHingeAngle: target.diagnosticTargetHingeAngle).rawValue else {
                     throw SimulatorError(message: "Duo lost its pose selection during \(context).")
                 }
                 let selectorFrame = controls.convert(selector.bounds, from: selector)
@@ -118,7 +121,7 @@ extension Diagnostics {
                        target.diagnosticConnectedScreenID == chrome.screenID,
                        !target.diagnosticDisplaySwitchInProgress,
                        !target.diagnosticHingeAnimationInProgress,
-                       target.diagnosticHingeAngle == mode.hingeAngle,
+                       abs(target.diagnosticHingeAngle - mode.hingeAngle) < 0.001,
                        target.screen.framebufferSize != .zero { break }
                     try await Task.sleep(for: .milliseconds(20))
                 }
@@ -126,7 +129,7 @@ extension Diagnostics {
                       target.diagnosticConnectedScreenID == chrome.screenID,
                       !target.diagnosticDisplaySwitchInProgress,
                       !target.diagnosticHingeAnimationInProgress,
-                      target.diagnosticHingeAngle == mode.hingeAngle,
+                      abs(target.diagnosticHingeAngle - mode.hingeAngle) < 0.001,
                       target.screen.framebufferSize != .zero else {
                     throw SimulatorError(message: "Duo did not finish switching to \(mode.label) during \(context).")
                 }
@@ -140,7 +143,7 @@ extension Diagnostics {
                     target.perform(orientationCommand(for: turns))
                 }
                 for _ in 0..<100 {
-                    if target.screen.quarterTurns == turns { break }
+                    if target.screen.quarterTurns == turns, !target.diagnosticHingeAnimationInProgress { break }
                     try await Task.sleep(for: .milliseconds(50))
                 }
                 guard target.screen.quarterTurns == turns else {
@@ -200,13 +203,17 @@ extension Diagnostics {
                     }
                     if turns == 0 { widths[mode] = target.presentation.controls.frame.width }
                     try saveSnapshot(mode: mode, turns: turns)
+                    let resizeFrame = window.frame
                     try queuedCornerResizeSmoke(controller: target)
-                    try assertStableWindow(frame, context: "corner resize rollback during \(context)")
+                    try assertStableWindow(resizeFrame, context: "corner resize rollback during \(context)")
                 }
             }
             guard let coverWidth = widths[.cover], let partialWidth = widths[.innerPartiallyOpen],
                   let openWidth = widths[.innerFullyOpen] else {
                 throw SimulatorError(message: "Duo toolbar geometry was not measured in every mode.")
+            }
+            guard coverWidth == partialWidth, partialWidth == openWidth else {
+                throw SimulatorError(message: "Folding changed the scale-only toolbar width.")
             }
 
             try await rotate(to: 0)
@@ -237,8 +244,8 @@ extension Diagnostics {
                 try assertStableWindow(gestureFrame, context: "continuous close at \(angle)°")
                 try assertChrome(context: "continuous close at \(angle)°")
                 let width = target.presentation.controls.frame.width
-                guard width <= previousToolbarWidth + 0.5 else {
-                    throw SimulatorError(message: "Duo toolbar grew again while closing at \(angle)°: \(previousToolbarWidth) -> \(width).")
+                guard previousToolbarWidth == .greatestFiniteMagnitude || abs(width - previousToolbarWidth) <= 0.5 else {
+                    throw SimulatorError(message: "Duo toolbar changed while closing at \(angle)°: \(previousToolbarWidth) -> \(width).")
                 }
                 previousToolbarWidth = width
                 try await Task.sleep(for: .milliseconds(16))
@@ -252,14 +259,14 @@ extension Diagnostics {
             }
             try await waitForMode(.innerFullyOpen, preserving: gestureFrame, context: "continuous open")
 
-            target.diagnosticSetHingeAngle(60)
+            target.diagnosticSetHingeAngle(135)
             guard let selector = target.presentation.controls.displayModeControl,
                   selector.selectedSegment == 1, let action = selector.action,
                   NSApp.sendAction(action, to: selector.target, from: selector) else {
                 throw SimulatorError(message: "The selected middle Duo button did not dispatch its preset.")
             }
             try await waitForMode(.innerPartiallyOpen, preserving: gestureFrame,
-                context: "selected middle button from 60°", invoke: false)
+                context: "selected middle button from 135°", invoke: false)
             target.perform(.coverScreen)
             try await Task.sleep(for: .milliseconds(150))
             let interruptedAngle = target.diagnosticHingeAngle
@@ -339,7 +346,7 @@ extension Diagnostics {
                 throw SimulatorError(message: "Duo recording used the wrong display: movie \(movieSize), active framebuffer \(target.screen.framebufferSize).")
             }
 
-            let result = "PASS: Duo switched three modes without a Starting overlay or window resize; "
+            let result = "PASS: Duo switched three modes without a Starting overlay or toolbar-anchor/scale drift; "
                 + "all modes rendered in four orientations; continuous 5° hinge steps stayed stable; "
                 + "all four visible resize corners worked in every mode and orientation; "
                 + "Save Screen and Copy Screen produced full-size PNGs before and after resizing; "

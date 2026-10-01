@@ -28,25 +28,6 @@ final class ToolbarLayoutContractTests: XCTestCase {
         }
     }
 
-    func testPillUsesClosedWidthAndTitleMinimumWithoutHistory() {
-        let metrics = SimulatorToolbarMetrics(titleWidth: 80, modeSize: CGSize(width: 128, height: 36))
-        for available: CGFloat in [424, 800, 1400] {
-            for closed: CGFloat in [0.5, 1] {
-                let deviceWidth = available - 24
-                let minimum = metrics.pillWidth(availableWidth: available, deviceWidth: deviceWidth,
-                    projectedFraction: closed, closedFraction: closed)
-                for projected: CGFloat in [1, 0.8, 0.5, 0.25, 0.1, 0.3, 0.5] {
-                    let width = metrics.pillWidth(availableWidth: available, deviceWidth: deviceWidth,
-                        projectedFraction: projected, closedFraction: closed)
-                    XCTAssertGreaterThanOrEqual(width, minimum)
-                    XCTAssertLessThanOrEqual(width, available)
-                    XCTAssertEqual(metrics.layout(width: width).height, metrics.layout(width: available).height,
-                        "Pose changes alone must not switch toolbar rows or resize the viewport")
-                }
-            }
-        }
-    }
-
     func testAttachedAndFullscreenStylesDoNotAlterTheSizingPolicy() {
         for selector: CGFloat in [0, 128] {
             let metrics = SimulatorToolbarMetrics(titleWidth: 140, modeSize: CGSize(width: selector, height: 36))

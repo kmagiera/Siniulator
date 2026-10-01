@@ -26,11 +26,6 @@ struct SimulatorToolbarMetrics: Equatable {
         SimulatorControlBarLayout(width: width, metrics: self, isFullScreen: isFullScreen,
             topInset: topInset, revealProgress: revealProgress, attached: attached)
     }
-    func pillWidth(availableWidth: CGFloat, deviceWidth: CGFloat,
-                   projectedFraction: CGFloat, closedFraction: CGFloat) -> CGFloat {
-        let fraction = min(1, max(0, projectedFraction, closedFraction))
-        return max(0, min(availableWidth, max(minimumExpandedWidth, deviceWidth * fraction)))
-    }
 }
 
 /// Pure geometry: every custom view receives its complete rectangle here.

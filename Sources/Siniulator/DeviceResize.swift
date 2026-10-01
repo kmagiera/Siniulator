@@ -85,13 +85,63 @@ struct DeviceResizeSession {
     }
 }
 
+/// Resize the projected hardware, not the much larger square render surface.
+/// All geometry scales linearly because neither a crop nor a panel switch can
+/// refit the camera. Screen coordinates here have their origin at bottom-left.
+struct DuoResizeSession {
+    let corner: DeviceResizeCorner
+    let initialFrame: CGRect
+    let initialDevice: CGRect
+    let initialPointer: CGPoint
+    let initialViewport: CGFloat
+    let headerHeight: CGFloat
+    let visibleFrame: CGRect
+    let toolbarSizing: DuoToolbarSizing
+    var maximumSpan: CGFloat = 1
+
+    func geometry(at pointer: CGPoint) -> (frame: CGRect, viewport: CGFloat) {
+        let dx = (pointer.x - initialPointer.x) * (corner.isLeft ? -1 : 1)
+        let dy = (pointer.y - initialPointer.y) * (corner.isTop ? 1 : -1)
+        let delta = (dx * initialDevice.width + dy * initialDevice.height) /
+            (initialDevice.width * initialDevice.width + initialDevice.height * initialDevice.height)
+        // Even the complete fold/roll sweep fits on this display at this scale.
+        let maximum = min(visibleFrame.width - 2 * DuoStage.outerMargin,
+            visibleFrame.height - headerHeight - DuoStage.toolbarGap - DuoStage.outerMargin) / maximumSpan
+        let viewport = min(maximum, max(min(280, maximum), initialViewport * (1 + delta)))
+        if pointer == initialPointer { return (initialFrame, initialViewport) }
+        let ratio = viewport / initialViewport
+        let deviceSize = CGSize(width: initialDevice.width * ratio, height: initialDevice.height * ratio)
+        let anchor = CGPoint(x: corner.isLeft ? initialDevice.maxX : initialDevice.minX,
+            y: corner.isTop ? initialDevice.minY : initialDevice.maxY)
+        let device = CGRect(x: corner.isLeft ? anchor.x - deviceSize.width : anchor.x,
+            y: corner.isTop ? anchor.y : anchor.y - deviceSize.height,
+            width: deviceSize.width, height: deviceSize.height)
+        let size = CGSize(width: ceil((max(toolbarSizing.width(for: viewport), device.width) + 2 * DuoStage.outerMargin) / 2) * 2,
+            height: ceil(headerHeight + DuoStage.toolbarGap + device.height + DuoStage.outerMargin))
+        let frame = CGRect(x: device.midX - size.width / 2,
+            y: device.maxY + headerHeight + DuoStage.toolbarGap - size.height,
+            width: size.width, height: size.height)
+        return (CGRect(x: max(visibleFrame.minX, min(frame.minX, visibleFrame.maxX - size.width)),
+            y: max(visibleFrame.minY, min(frame.minY, visibleFrame.maxY - size.height)),
+            width: size.width, height: size.height), viewport)
+    }
+}
+
 @MainActor final class DeviceHostWindow: NSWindow {
-    private var resizeSession: DeviceResizeSession?
+    private enum ResizeSession {
+        case ordinary(DeviceResizeSession), duo(DuoResizeSession)
+    }
+    private var resizeSession: ResizeSession?
     var isCornerResizing: Bool { resizeSession != nil }
     var onManualResize: (() -> Void)?
     private var localPointerMonitor: Any?
     private var globalPointerMonitor: Any?
     private var trackingMagnification = false
+    private(set) var hoveredResizeCorner: DeviceResizeCorner?
+    var pointerWindowAt: (CGPoint) -> Int = {
+        NSWindow.windowNumber(at: $0, belowWindowWithWindowNumber: 0)
+    }
+    var applyHoverCursor: (DeviceResizeCorner?) -> Void = { ($0?.cursor ?? .arrow).set() }
 
     /// WindowServer otherwise treats the entire SceneKit backing surface as a
     /// mouse target, including its transparent, unfolded-size margins. A nil
@@ -121,13 +171,29 @@ struct DeviceResizeSession {
         guard !styleMask.contains(.fullScreen),
               let root = contentView as? DevicePresentationView, root.hasTransparentDuoMargins else {
             ignoresMouseEvents = false
+            hoveredResizeCorner = nil
             return
         }
         // Preserve the owner of an in-flight drag, even beyond the mesh. This
         // applies both to simulator input/resizing and a drag in the app below.
         guard !buttonsPressed, !isCornerResizing, !trackingMagnification else { return }
         let local = root.convert(convertPoint(fromScreen: screenPoint), from: nil)
-        ignoresMouseEvents = !root.acceptsMouse(at: local)
+        // Outside the entire window there is nothing to pass through. Leaving
+        // it disabled there prevented WindowServer from finding it on re-entry
+        // until a later global mouse sample re-enabled it from inside.
+        let inside = root.bounds.contains(local)
+        let region = root.pointerRegion(at: local)
+        ignoresMouseEvents = inside && region == .passthrough
+        let corner = region.resizeCorner
+        hoveredResizeCorner = corner
+        // Re-enabling a window while the pointer is already inside a cursor
+        // rectangle does not guarantee an AppKit entry event. Apply the exact
+        // frame cursor on that very sample, including a global-monitor sample.
+        // Query ownership *after* restoring mouse reception; hidden/covered
+        // windows must never override another application's pointer.
+        if inside, !ignoresMouseEvents, pointerWindowAt(screenPoint) == windowNumber {
+            applyHoverCursor(corner)
+        }
     }
 
     private func stopPointerMonitoring() {
@@ -136,6 +202,7 @@ struct DeviceResizeSession {
         localPointerMonitor = nil
         globalPointerMonitor = nil
         ignoresMouseEvents = false
+        hoveredResizeCorner = nil
     }
 
     func updatePresentationBackground() {
@@ -146,6 +213,19 @@ struct DeviceResizeSession {
         if isOpaque != attached { isOpaque = attached }
         let color: NSColor = attached ? .black : .clear
         if backgroundColor != color { backgroundColor = color }
+        updateNativeResizePolicy()
+    }
+
+    func updateNativeResizePolicy() {
+        guard let root = contentView as? DevicePresentationView else { return }
+        // Swallowing edge mouse-downs does not remove WindowServer's resize
+        // cursors. Normal Duo windows have only the four hardware targets.
+        // Explicit fullscreen collection behavior still owns the green button.
+        let native = !root.hasTransparentDuoMargins || styleMask.contains(.fullScreen)
+        if native != styleMask.contains(.resizable) {
+            if native { styleMask.insert(.resizable) }
+            else { styleMask.remove(.resizable) }
+        }
     }
 
     private func screenPosition(of event: NSEvent) -> CGPoint {
@@ -180,13 +260,20 @@ struct DeviceResizeSession {
         }
         if let session = resizeSession {
             if event.type == .leftMouseDragged {
-                onManualResize?()
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
-                let geometry = session.geometry(at: screenPosition(of: event))
-                (contentView as? DevicePresentationView)?.canvas.maximumScale = geometry.scale
-                setFrame(geometry.frame, display: false, animate: false)
+                switch session {
+                case let .duo(session):
+                    let geometry = session.geometry(at: screenPosition(of: event))
+                    (contentView as? DevicePresentationView)?.duoViewportSide = geometry.viewport
+                    setFrame(geometry.frame, display: false, animate: false)
+                case let .ordinary(session):
+                    let geometry = session.geometry(at: screenPosition(of: event))
+                    (contentView as? DevicePresentationView)?.canvas.maximumScale = geometry.scale
+                    setFrame(geometry.frame, display: false, animate: false)
+                }
                 contentView?.layoutSubtreeIfNeeded()
+                onManualResize?()
                 displayIfNeeded()
                 CATransaction.commit()
                 return
@@ -199,23 +286,32 @@ struct DeviceResizeSession {
             let point = root.convert(convertFromScreen(CGRect(origin: pointer, size: .zero)).origin, from: nil)
             if let corner = root.resizeCorner(at: point), let visible = screen?.visibleFrame {
                 root.canvas.screen.releaseKeys()
-                resizeSession = DeviceResizeSession(corner: corner, initialFrame: frame,
-                    initialPointer: pointer,
-                    deviceSize: root.canvas.geometry.size, initialScale: root.canvas.geometry.fit(in: root.canvas.bounds, maximumScale: root.canvas.maximumScale).scale,
-                    visibleFrame: visible, minimumSize: minSize, toolbarMetrics: root.controls.metrics)
+                if root.canvas.usesDuoModel {
+                    let device = convertToScreen(root.convert(root.visualDeviceRect, to: nil))
+                    resizeSession = .duo(DuoResizeSession(corner: corner, initialFrame: frame,
+                        initialDevice: device, initialPointer: pointer, initialViewport: root.duoViewportSide,
+                        headerHeight: root.controls.frame.height, visibleFrame: visible,
+                        toolbarSizing: root.duoToolbarSizing,
+                        maximumSpan: root.canvas.duoMaximumProjectedSpan))
+                } else {
+                    resizeSession = .ordinary(DeviceResizeSession(corner: corner, initialFrame: frame,
+                        initialPointer: pointer,
+                        deviceSize: root.canvas.geometry.size, initialScale: root.canvas.geometry.fit(in: root.canvas.bounds, maximumScale: root.canvas.maximumScale).scale,
+                        visibleFrame: visible, minimumSize: minSize, toolbarMetrics: root.controls.metrics))
+                }
                 makeKey()
                 disableCursorRects()
                 corner.cursor.push()
                 return
             }
-            // Retain .resizable for native full screen / Split View, but do not
-            // forward normal-window edge gestures to AppKit's frame resizer.
+            // Ordinary devices retain their native style, but their bezel resize
+            // is still diagonal-only. Duo disables native resize regions above.
             if point.x < 7 || point.y < 7 || point.x > root.bounds.maxX - 7 || point.y > root.bounds.maxY - 7 { return }
         }
         super.sendEvent(event)
     }
     func endCornerResize() {
-        guard resizeSession != nil else { return }
+        guard isCornerResizing else { return }
         resizeSession = nil
         NSCursor.pop()
         enableCursorRects()

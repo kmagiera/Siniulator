@@ -31,7 +31,9 @@ enum DeviceCommand: Int {
     private(set) var scalingMode: DeviceScalingMode = .custom
     private(set) var hardwareKeyboardEnabled: Bool
     private var isApplyingScale = false
+    private var duoWindowAnchor: CGPoint?
     var showsBezels: Bool { presentation.canvas.showsBezels }
+    var canHideBezels: Bool { presentation.canvas.canHideBezels }
     private var isEnteringFullScreen = false
     private var fullScreenChrome: FullScreenChrome?
     private let overlay = NSStackView()
@@ -43,10 +45,13 @@ enum DeviceCommand: Int {
     private var connectVersion = 0
     private var displaySwitchTask: Task<Void, Never>?
     private var displaySwitchVersion = 0
-    private var hingeAnimationTask: Task<Void, Never>?
-    private var hingeAnimationVersion = 0
+    private var motionLink: CADisplayLink?
+    private var lastMotionTimestamp: CFTimeInterval?
+    private var duoMotion: DuoMotion
+    private var pinchProgress = 0.0
     private var hingeFeedback = DuoHingeFeedback()
     private var currentHingeAngle: Double
+    private var sentHingeAngle: Double?
     private var connectedScreenID: UInt32?
     private var duoDisplays: [UInt32: SIDisplay] = [:]
     private var displayWarmupTask: Task<Void, Never>?
@@ -65,16 +70,27 @@ enum DeviceCommand: Int {
     var isStoppingRecording: Bool { recording?.isStopping == true }
     var recordingHasStarted: Bool { recording?.hasStarted == true }
 #if DEBUG
+    var diagnosticCollectMotion = false
+    var diagnosticMotionFrames: [(time: Double, angle: Double, turns: Double, cost: Double,
+        frame: CGRect, hardware: CGRect, toolbar: CGRect, viewport: CGFloat)] = []
+    func diagnosticMagnify(_ delta: Double, phase: NSEvent.Phase) { handleDuoMagnify(delta: delta, phase: phase) }
     var diagnosticConnectedScreenID: UInt32? { connectedScreenID }
     var diagnosticDisplaySwitchInProgress: Bool { displaySwitchTask != nil }
     var diagnosticHingeAngle: Double { currentHingeAngle }
-    var diagnosticHingeAnimationInProgress: Bool { hingeAnimationTask != nil }
+    var diagnosticTargetHingeAngle: Double { DuoPose.angle(at: duoMotion.fold.target) }
+    var diagnosticHingeAnimationInProgress: Bool { motionLink != nil }
     var diagnosticShowsConnectionOverlay: Bool { !overlay.isHidden }
     var diagnosticConnectionMessage: String { message.stringValue }
     var diagnosticReadyPanelIDs: [UInt32] {
         duoDisplays.compactMap { $0.value.surface == nil ? nil : $0.key }.sorted()
     }
     func diagnosticSetHingeAngle(_ angle: Double) { setInteractiveHingeAngle(angle) }
+    func diagnosticAnimateHinge(to angle: Double) { animateHinge(to: angle) }
+    func diagnosticRenderPose(angle: Double, quarterTurns: Double) {
+        duoMotion.fold.snap(to: DuoPose.phase(for: angle))
+        duoMotion.roll.snap(to: quarterTurns)
+        renderMotion()
+    }
 #endif
     var slowAnimationsEnabled: Bool? {
         guard connected, let input else { return nil }
@@ -90,9 +106,11 @@ enum DeviceCommand: Int {
             .flatMap { DeviceDisplayMode(rawValue: $0.intValue) }
         let fallbackMode = savedDisplayMode.flatMap { displayModes.contains($0) ? $0 : nil } ?? displayModes.last
         let savedHingeAngle = (UserDefaults.standard.object(forKey: "hinge-angle-\(device.id)") as? NSNumber)?.doubleValue
-        let hingeAngle = min(180, max(0, savedHingeAngle ?? fallbackMode?.hingeAngle ?? 180))
+        let hingeAngle = DuoPose.restingAngle(savedHingeAngle ?? fallbackMode?.hingeAngle ?? 180)
         self.displayMode = displayModes.isEmpty ? nil : DeviceDisplayMode.mode(forHingeAngle: hingeAngle)
         self.currentHingeAngle = hingeAngle
+        self.duoMotion = DuoMotion(angle: hingeAngle, quarterTurns:
+            ScreenGeometry.normalizedQuarterTurns(UserDefaults.standard.integer(forKey: "orientation-\(device.id)")))
         self.hardwareKeyboardEnabled = UserDefaults.standard.object(forKey: "hardware-keyboard-\(device.id)") as? Bool ?? true
         self.store = store
         self.settings = settings
@@ -150,6 +168,10 @@ enum DeviceCommand: Int {
         window.onManualResize = { [weak self] in
             self?.scalingMode = .custom
             self?.presentation.canvas.pixelAligned = false
+            if let self, self.presentation.canvas.usesDuoModel {
+                self.recordDuoWindowAnchor()
+                UserDefaults.standard.set(self.presentation.duoViewportSide, forKey: "duo-viewport-\(device.id)")
+            }
         }
         overlay.orientation = .vertical
         overlay.alignment = .centerX
@@ -188,7 +210,27 @@ enum DeviceCommand: Int {
                 self.window?.close()
             }
         }
-        fitWindowToDevice()
+        if root.canvas.usesDuoModel {
+            // Reserve projection scale for the complete sweep once, then crop
+            // the window around each pose. Camera fitting never sees that crop.
+            let header = root.controls.height(for: root.duoToolbarWidth)
+            let savedSide = UserDefaults.standard.double(forKey: "duo-viewport-\(device.id)")
+            let span = root.canvas.duoMaximumProjectedSpan
+            let side = min(savedSide > 0 ? CGFloat(savedSide) : DuoStage.viewport,
+                (available.width - 2 * DuoStage.outerMargin) / span,
+                (available.height - header - DuoStage.toolbarGap - DuoStage.outerMargin - 40) / span)
+            let size = CGSize(width: side + 2 * DuoStage.outerMargin,
+                height: side + header + DuoStage.toolbarGap + DuoStage.outerMargin)
+            root.duoViewportSide = side
+            window.minSize = CGSize(width: root.duoToolbarSizing.minimumWidth + 2 * DuoStage.outerMargin,
+                height: header + DuoStage.toolbarGap + DuoStage.outerMargin)
+            window.maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            window.setFrame(CGRect(origin: window.frame.origin, size: size), display: false)
+            root.refreshGeometry()
+            fitDuoWindow(constrainToScreen: true)
+        } else {
+            fitWindowToDevice()
+        }
         connect()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
@@ -256,14 +298,11 @@ enum DeviceCommand: Int {
                                                digitizerTarget: connectionChrome.digitizerTarget)
                     try await input.activate()
                 }
-                if !displayModes.isEmpty, input.setHingeAngle(currentHingeAngle) {
-                    try await Task.sleep(for: .milliseconds(350))
-                }
                 if !displayModes.isEmpty {
+                    _ = input.setHingeAngle(DuoPose.angle(at: duoMotion.fold.target))
                     guard input.setFoldableOrientation(quarterTurns: screen.quarterTurns) else {
                         throw SimulatorError(message: "The Duo orientation control is unavailable.")
                     }
-                    try await Task.sleep(for: .milliseconds(350))
                 }
                 try input.setHardwareKeyboardEnabled(hardwareKeyboardEnabled)
                 let previousOrientation = screen.quarterTurns
@@ -293,7 +332,7 @@ enum DeviceCommand: Int {
                 if !displayModes.isEmpty {
                     // Changes made while input was still local to this task
                     // must reach the guest before the final panel selection.
-                    _ = input.setHingeAngle(currentHingeAngle)
+                    _ = input.setHingeAngle(DuoPose.angle(at: duoMotion.fold.target))
                     synchronizeDisplay()
                 }
                 overlay.isHidden = true
@@ -308,9 +347,7 @@ enum DeviceCommand: Int {
         displaySwitchTask?.cancel()
         displaySwitchTask = nil
         displaySwitchVersion += 1
-        hingeAnimationTask?.cancel()
-        hingeAnimationTask = nil
-        hingeAnimationVersion += 1
+        stopMotion()
         screen.releaseKeys()
         stopDisplays()
         display = nil; input = nil
@@ -395,37 +432,42 @@ enum DeviceCommand: Int {
 
     private func handleDuoMagnify(_ event: NSEvent) -> Bool {
         guard !displayModes.isEmpty else { return false }
-        if event.phase == .began {
-            hingeAnimationTask?.cancel()
-            hingeAnimationTask = nil
-            hingeAnimationVersion += 1
+        handleDuoMagnify(delta: Double(event.magnification), phase: event.phase)
+        return true
+    }
+
+    private func handleDuoMagnify(delta: Double, phase: NSEvent.Phase) {
+        if phase == .began {
+            pinchProgress = DuoPose.pinchProgress(duoMotion.fold.target)
             screen.releaseKeys()
         }
-        let delta = Double(event.magnification) * 180
-        let previousAngle = currentHingeAngle
-        if abs(delta) > 0.0001 {
-            setInteractiveHingeAngle(currentHingeAngle + delta)
-        }
-        if hingeFeedback.update(from: previousAngle, to: currentHingeAngle, phase: event.phase) {
+        let previousAngle = DuoPose.angle(at: duoMotion.fold.target)
+        pinchProgress = min(1, max(0, pinchProgress + delta * 2))
+        animateHinge(toPhase: DuoPose.pinchPhase(pinchProgress))
+        let angle = DuoPose.angle(at: duoMotion.fold.target)
+        if hingeFeedback.update(from: previousAngle, to: angle, phase: phase) {
             // Ask for the current performer each time: AppKit handles hardware
             // support and user preferences. Preset animations never use this path.
             NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .drawCompleted)
         }
-        if event.phase == .ended || event.phase == .cancelled {
-            UserDefaults.standard.set(currentHingeAngle, forKey: "hinge-angle-\(deviceInfo.id)")
+        if phase == .ended || phase == .cancelled {
+            UserDefaults.standard.set(angle, forKey: "hinge-angle-\(deviceInfo.id)")
             if let displayMode {
                 UserDefaults.standard.set(displayMode.rawValue, forKey: "display-mode-\(deviceInfo.id)")
             }
             window?.makeFirstResponder(screen)
         }
-        return true
     }
 
     private func setInteractiveHingeAngle(_ proposedAngle: Double) {
         let angle = min(180, max(0, proposedAngle))
-        guard angle != currentHingeAngle else { return }
-        currentHingeAngle = angle
-        _ = input?.setHingeAngle(angle)
+        duoMotion.fold.snap(to: DuoPose.phase(for: angle))
+        prepareDuoTarget(angle)
+        renderMotion()
+    }
+
+    private func prepareDuoTarget(_ angle: Double) {
+        presentation.canvas.requestDuoPanel(cover: angle <= DeviceDisplayMode.coverHandoffAngle)
 
         let nextMode = DeviceDisplayMode.mode(forHingeAngle: angle)
         if nextMode != displayMode {
@@ -436,9 +478,7 @@ enum DeviceCommand: Int {
             presentation.canvas.maximumScale = scalingMode.isAccurate ? logicalScale(for: scalingMode) : nil
             synchronizeDisplay()
         }
-        presentation.canvas.setHingeAngle(CGFloat(angle))
         presentation.controls.update(hingeAngle: angle)
-        presentation.refreshGeometry()
     }
     private func synchronizeDisplay() {
         displaySwitchTask?.cancel()
@@ -456,35 +496,102 @@ enum DeviceCommand: Int {
         }
     }
     private func animateHinge(to target: Double) {
-        hingeAnimationTask?.cancel()
-        hingeAnimationTask = nil
-        hingeAnimationVersion += 1
-        let version = hingeAnimationVersion
-        // Undo the segmented control's immediate target selection. Selection
-        // follows the current pose, including clicks on the selected middle item.
-        presentation.controls.update(hingeAngle: currentHingeAngle)
-        let animation = DuoHingeAnimation(start: currentHingeAngle, target: target)
-        guard abs(target - currentHingeAngle) > 0.1,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            setInteractiveHingeAngle(target)
+        animateHinge(toPhase: DuoPose.phase(for: target))
+    }
+    private func animateHinge(toPhase target: Double) {
+        duoMotion.fold.target = target
+        // Freeze the departing panel before any HID changes, and select the
+        // toolbar's endpoint immediately. Native hinge samples follow the
+        // rendered motion, not this (potentially distant) target.
+        prepareDuoTarget(DuoPose.angle(at: target))
+        startMotion()
+    }
+
+    private func startMotion() {
+        presentation.isDuoAnimating = true
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            duoMotion.fold.snap(to: duoMotion.fold.target)
+            duoMotion.roll.snap(to: duoMotion.roll.target)
+            renderMotion()
+            stopMotion()
             return
         }
-        hingeAnimationTask = Task { [weak self] in
-            guard let self else { return }
-            let started = CACurrentMediaTime()
-            while true {
-                do { try Task.checkCancellation() }
-                catch { return }
-                let linear = min(1, max(0, (CACurrentMediaTime() - started) / animation.duration))
-                // One clock drives HID, model, active panel and toolbar. A
-                // pinch or another preset resumes from this exact visible pose.
-                setInteractiveHingeAngle(animation.angle(at: linear))
-                if linear >= 1 { break }
-                do { try await Task.sleep(for: .milliseconds(16)) }
-                catch { return }
-            }
-            if hingeAnimationVersion == version { hingeAnimationTask = nil }
+        guard motionLink == nil else { return }
+        lastMotionTimestamp = nil
+        motionLink = presentation.displayLink(target: self, selector: #selector(advanceMotion(_:)))
+        motionLink?.add(to: .main, forMode: .common)
+    }
+
+    @objc private func advanceMotion(_ link: CADisplayLink) {
+        let started = CACurrentMediaTime()
+        let dt = lastMotionTimestamp.map { link.timestamp - $0 } ?? (1.0 / 60)
+        lastMotionTimestamp = link.timestamp
+        duoMotion.advance(seconds: dt)
+        renderMotion()
+#if DEBUG
+        if diagnosticCollectMotion {
+            diagnosticMotionFrames.append((link.timestamp, currentHingeAngle, duoMotion.roll.value, CACurrentMediaTime() - started,
+                window?.frame ?? .zero, presentation.visualDeviceRect, presentation.controls.frame, presentation.duoViewportSide))
         }
+#endif
+        if duoMotion.isSettled { stopMotion() }
+    }
+
+    private func renderMotion() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let pose = duoMotion.renderedPose
+        currentHingeAngle = Double(pose.angle)
+        // iOS's interactive fold needs the continuous path, including during
+        // the automatic turn. Jumping to the target can cancel its panel swap
+        // after a pause, leaving the visible panel black. One clock drives both.
+        if sentHingeAngle != currentHingeAngle, input?.setHingeAngle(currentHingeAngle) == true {
+            sentHingeAngle = currentHingeAngle
+        }
+        presentation.canvas.setRenderedDuoPose(pose)
+        fitDuoWindow()
+    }
+
+    private func stopMotion() {
+        motionLink?.invalidate()
+        motionLink = nil
+        lastMotionTimestamp = nil
+        presentation.isDuoAnimating = false
+        if let window { window.invalidateCursorRects(for: presentation) }
+    }
+    private func fitDuoWindow(constrainToScreen: Bool = false) {
+        guard presentation.canvas.usesDuoModel, !presentation.isFullScreen, !isEnteringFullScreen,
+              let window, !window.styleMask.contains(.fullScreen),
+              (window as? DeviceHostWindow)?.isCornerResizing != true else { return }
+        presentation.layoutSubtreeIfNeeded()
+        let size = presentation.duoWindowSize
+        let anchor = duoWindowAnchor ?? CGPoint(x: window.frame.midX, y: window.frame.maxY)
+        // AppKit rounds window origins. Reusing a rounded frame's midpoint
+        // accumulated half-point errors whenever the crop width changed parity.
+        // Use a persistent toolbar anchor and even widths, not frame feedback.
+        let width = ceil(size.width / 2) * 2, height = ceil(size.height)
+        var rect = CGRect(x: anchor.x - width / 2, y: anchor.y - height, width: width, height: height)
+        // A pose only changes the transparent crop. Clamping every intermediate
+        // bounding box moved the toolbar sideways and fed that position into
+        // the next frame. Placement constraints belong to initial placement,
+        // leaving fullscreen, and the user's corner resize, not each pose.
+        if constrainToScreen, let visible = window.screen?.visibleFrame {
+            rect.origin.x = max(visible.minX, min(rect.minX, visible.maxX - rect.width))
+            rect.origin.y = max(visible.minY, min(rect.minY, visible.maxY - rect.height))
+        }
+        isApplyingScale = true
+        if window.frame != rect { window.setFrame(rect, display: false, animate: false) }
+        isApplyingScale = false
+        if duoWindowAnchor == nil || constrainToScreen { recordDuoWindowAnchor() }
+        presentation.layoutSubtreeIfNeeded()
+        // The pose can change while the rounded crop stays identical. Pointer
+        // ownership still follows the new mesh, without relaying out its views.
+        (window as? DeviceHostWindow)?.updateMousePassthrough()
+    }
+    private func recordDuoWindowAnchor() {
+        guard let window else { return }
+        duoWindowAnchor = CGPoint(x: window.frame.midX, y: window.frame.maxY)
     }
     private func switchDisplay(to chrome: DeviceChrome, mode: DeviceDisplayMode, version: Int) {
         displaySwitchTask = Task { [weak self] in
@@ -579,18 +686,21 @@ enum DeviceCommand: Int {
     }
     private func rotate(to turns: Int) {
         screen.releaseKeys()
+        if !displayModes.isEmpty {
+            guard input?.setFoldableOrientation(quarterTurns: turns) == true else {
+                report(SimulatorError(message: "The Duo orientation control is unavailable."))
+                return
+            }
+            screen.quarterTurns = turns
+            duoMotion.rotate(to: turns)
+            UserDefaults.standard.set(turns, forKey: "orientation-\(deviceInfo.id)")
+            startMotion()
+            return
+        }
         let orientations: [UInt32] = [1, 3, 2, 4]
-        let isFoldable = !displayModes.isEmpty
         Task {
             do {
-                if isFoldable {
-                    guard input?.setFoldableOrientation(quarterTurns: turns) == true else {
-                        throw SimulatorError(message: "The Duo orientation control is unavailable.")
-                    }
-                    try await Task.sleep(for: .milliseconds(350))
-                } else {
-                    try await input?.rotate(orientation: orientations[turns], udid: deviceInfo.id)
-                }
+                try await input?.rotate(orientation: orientations[turns], udid: deviceInfo.id)
                 guard !closed, connected else { return }
                 presentation.layoutSubtreeIfNeeded()
                 let previousScale = presentation.canvas.fittedGeometry.scale
@@ -610,6 +720,7 @@ enum DeviceCommand: Int {
         }
     }
     private func fitWindowToDevice() {
+        guard !presentation.canvas.usesDuoModel else { return }
         guard let window, !window.styleMask.contains(.fullScreen) else { return }
         presentation.layoutSubtreeIfNeeded()
         let fit = presentation.canvas.geometry.fit(in: presentation.canvas.bounds, maximumScale: presentation.canvas.maximumScale)
@@ -626,6 +737,7 @@ enum DeviceCommand: Int {
             deviceDPI: presentation.canvas.chrome.displayDPI, displayPointsPerInch: window?.screen?.physicalPointsPerInch)
     }
     func canSelectScalingMode(_ mode: DeviceScalingMode) -> Bool {
+        guard !presentation.canvas.usesDuoModel else { return false }
         guard let scale = logicalScale(for: mode) else { return !mode.isAccurate }
         return canFitLogicalScale(scale)
     }
@@ -659,6 +771,7 @@ enum DeviceCommand: Int {
         selectScalingMode(canSelectScalingMode(scalingMode) ? scalingMode : .fitScreen)
     }
     private func toggleBezels() {
+        guard canHideBezels else { return }
         (window as? DeviceHostWindow)?.endCornerResize()
         screen.releaseKeys()
         presentation.layoutSubtreeIfNeeded()
@@ -676,6 +789,7 @@ enum DeviceCommand: Int {
         }
     }
     private func applyScale(logicalScale desiredScale: CGFloat?, exact: Bool = false) {
+        guard !presentation.canvas.usesDuoModel else { return }
         guard let window, let available = window.screen?.visibleFrame else { return }
         if window.styleMask.contains(.fullScreen) {
             presentation.canvas.maximumScale = desiredScale
@@ -874,7 +988,7 @@ enum DeviceCommand: Int {
         closed = true
         connectTask?.cancel()
         displaySwitchTask?.cancel()
-        hingeAnimationTask?.cancel()
+        stopMotion()
         deviceObservation?.cancel()
         presentation.isFullScreen = false
         stopRecording()
@@ -897,10 +1011,17 @@ enum DeviceCommand: Int {
             }
         } else {
             guard (window as? DeviceHostWindow)?.isCornerResizing != true else { return }
+            if presentation.canvas.usesDuoModel { recordDuoWindowAnchor() }
             scalingMode = .custom
             presentation.canvas.pixelAligned = false
             presentation.canvas.maximumScale = nil
         }
+    }
+    func windowDidMove(_ notification: Notification) {
+        guard presentation != nil, presentation.canvas.usesDuoModel,
+              !isApplyingScale, !isEnteringFullScreen, !presentation.isFullScreen,
+              (window as? DeviceHostWindow)?.isCornerResizing != true else { return }
+        recordDuoWindowAnchor()
     }
     func windowDidChangeBackingProperties(_ notification: Notification) {
         guard presentation != nil, !isApplyingScale,
@@ -916,8 +1037,10 @@ enum DeviceCommand: Int {
         (window as? DeviceHostWindow)?.endCornerResize()
         isEnteringFullScreen = true
         window?.level = .normal
-        (window as? DeviceHostWindow)?.updatePresentationBackground()
         presentation.isFullScreen = true
+        // Restore native resizing before AppKit sizes the fullscreen content.
+        // Changing it inside that layout can apply the content size delta twice.
+        (window as? DeviceHostWindow)?.updatePresentationBackground()
     }
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions) -> NSApplication.PresentationOptions {
         // AppKit reveals the menu bar, status items and original window controls together.
@@ -959,5 +1082,6 @@ enum DeviceCommand: Int {
         presentation.controls.attach(to: window)
         presentation.controls.isHidden = false
         presentation.refreshGeometry()
+        if presentation.canvas.usesDuoModel { fitDuoWindow(constrainToScreen: true) }
     }
 }

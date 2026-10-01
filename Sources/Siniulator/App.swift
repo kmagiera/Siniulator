@@ -272,7 +272,7 @@ import Sparkle
         item.state = .off
         if command == .showBezels {
             item.state = controller.showsBezels ? .on : .off
-            return true
+            return controller.canHideBezels
         }
         let scaling: [DeviceCommand: DeviceScalingMode] = [.physicalSize: .physicalSize, .pointAccurate: .pointAccurate, .pixelAccurate: .pixelAccurate, .fit: .fitScreen]
         if let mode = scaling[command] {

@@ -48,33 +48,20 @@ enum DeviceDisplayMode: Int, CaseIterable {
         case .innerFullyOpen: 180
         }
     }
-    static let coverHandoffAngle = 15.0
+    // Selection inside the non-resting camera turn is only used for hit tests.
+    // Gesture endpoints are <= coverRestAngle or >= innerRestAngle.
+    static let coverHandoffAngle = (DuoPose.coverRestAngle + DuoPose.innerRestAngle) / 2
     static func mode(forHingeAngle angle: Double) -> DeviceDisplayMode {
         if angle <= coverHandoffAngle { return .cover }
         if angle >= 179.5 { return .innerFullyOpen }
         return .innerPartiallyOpen
     }
-    // Toolbar selection describes the physical pose, not the active display
-    // (whose handoff happens before the hinge reaches either endpoint).
+    // Toolbar selection describes the requested target, not the rendered
+    // intermediate pose or the asynchronous native display connection.
     static func selectedMode(forHingeAngle angle: Double) -> DeviceDisplayMode {
         if angle <= 0 { return .cover }
         if angle >= 180 { return .innerFullyOpen }
         return .innerPartiallyOpen
-    }
-}
-
-struct DuoHingeAnimation {
-    let start: Double
-    let target: Double
-    var duration: TimeInterval { max(0.35, min(1, abs(target - start) / 180)) }
-
-    func angle(at progress: Double) -> Double {
-        if progress <= 0 { return start }
-        if progress >= 1 { return target }
-        // Quintic ease-in-out: zero velocity and acceleration at both ends.
-        let t = progress
-        let eased = t * t * t * (t * (6 * t - 15) + 10)
-        return start + (target - start) * eased
     }
 }
 
@@ -324,24 +311,36 @@ struct ChromeGeometry {
     let screen: SimulatorScreenView
     private(set) var chrome: DeviceChrome
     var onButton: ((DeviceCommand) -> Void)?
-    var onDuoProjectionWidthChange: ((CGFloat) -> Void)?
-    var duoProjectionSizeFractions: CGSize { bodyView.duoProjectionSizeFractions }
     var usesDuoModel: Bool { showsBezels && bodyView.hasDuoModel }
     func containsDuoHardware(at point: CGPoint) -> Bool {
         bodyView.containsDuoHardware(at: bodyView.convert(point, from: self))
     }
-    var duoProjectionWidthFraction: CGFloat { duoProjectionSizeFractions.width }
-    var duoClosedProjectionWidthFraction: CGFloat {
-        bodyView.hasDuoModel && screen.quarterTurns.isMultiple(of: 2) ? 0.5 : 1
+    func containsDuoResizeFrame(at point: CGPoint) -> Bool {
+        bodyView.containsDuoResizeFrame(at: bodyView.convert(point, from: self))
     }
     var duoResizeCornerPoints: [DeviceResizeCorner: CGPoint]? {
         bodyView.duoResizeCornerPoints?.mapValues { convert($0, from: bodyView) }
     }
-    var maximumScale: CGFloat? { didSet { needsLayout = true; needsDisplay = true } }
-    var showsBezels = true {
-        didSet { needsLayout = true; needsDisplay = true }
+    var duoHardwareBounds: CGRect? {
+        bodyView.duoHardwareBounds.map { convert($0, from: bodyView) }
     }
-    var pixelAligned = false { didSet { needsLayout = true } }
+    var duoMaximumProjectedSpan: CGFloat { bodyView.duoMaximumProjectedSpan }
+    var duoToolbarWidthFraction: CGFloat { bodyView.duoToolbarWidthFraction }
+    var anchorsDuoToTop = false {
+        didSet { if oldValue != anchorsDuoToTop { bodyView.anchorsDuoToTop = anchorsDuoToTop; needsLayout = true } }
+    }
+    var maximumScale: CGFloat? { didSet { if oldValue != maximumScale { needsLayout = true; needsDisplay = true } } }
+    var canHideBezels: Bool { chrome.displayMode == nil }
+    private var ordinaryShowsBezels = true
+    var showsBezels: Bool {
+        get { !canHideBezels || ordinaryShowsBezels }
+        set {
+            guard canHideBezels, ordinaryShowsBezels != newValue else { return }
+            ordinaryShowsBezels = newValue
+            needsLayout = true; needsDisplay = true
+        }
+    }
+    var pixelAligned = false { didSet { if oldValue != pixelAligned { needsLayout = true } } }
     var alignsScreenToTop = false { didSet { if oldValue != alignsScreenToTop { needsLayout = true } } }
     private let bodyView: DeviceBodyView
     private let modelChrome: DeviceChrome
@@ -357,10 +356,6 @@ struct ChromeGeometry {
         configureScreen(for: chrome)
         addSubview(bodyView)
         bodyView.onButton = { [weak self] command in self?.onButton?(command) }
-        bodyView.onDuoProjectionWidthChange = { [weak self] fraction in
-            guard let self else { return }
-            self.onDuoProjectionWidthChange?(self.duoProjectionWidthFraction)
-        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
     var geometry: ChromeGeometry {
@@ -374,6 +369,7 @@ struct ChromeGeometry {
         bodyView.updateDuoDisplay(display, chrome: chrome)
     }
     var fittedGeometry: (rect: CGRect, scale: CGFloat) {
+        if usesDuoModel { return (bounds, 1) }
         var fit = geometry.fit(in: bounds, maximumScale: maximumScale)
         if alignsScreenToTop { fit.rect.origin.y = bounds.minY }
         return fit
@@ -388,8 +384,13 @@ struct ChromeGeometry {
     func setHingeAngle(_ angle: CGFloat) {
         bodyView.setHingeAngle(angle)
     }
+    func setRenderedDuoPose(_ pose: DuoRenderPose) {
+        bodyView.setRenderedDuoPose(pose)
+    }
+    func requestDuoPanel(cover: Bool) { bodyView.requestDuoPanel(cover: cover) }
 #if DEBUG
     func duoSnapshot() -> NSImage? { bodyView.duoSnapshot() }
+    var duoCameraUpdateCount: Int { bodyView.duoCameraUpdateCount }
 #endif
     private func configureScreen(for chrome: DeviceChrome) {
         if screen.display == nil || screen.displayChrome?.screenID == chrome.screenID {
@@ -399,7 +400,7 @@ struct ChromeGeometry {
     override func layout() {
         super.layout()
         let fit = fittedGeometry
-        bodyView.frame = fit.rect
+        if bodyView.frame != fit.rect { bodyView.frame = fit.rect }
         bodyView.scale = fit.scale
         bodyView.showsBezels = showsBezels
         bodyView.pixelAligned = pixelAligned
@@ -411,28 +412,34 @@ struct ChromeGeometry {
         guard showsBezels, let duoModel else { return false }
         return duoModel.containsHardware(at: duoModel.convert(point, from: self))
     }
-    let screen: SimulatorScreenView
-    var chrome: DeviceChrome { didSet { pressed = nil; needsLayout = true; needsDisplay = true } }
-    var scale: CGFloat = 1 { didSet { needsLayout = true; needsDisplay = true } }
-    var showsBezels = true { didSet { pressed = nil; needsLayout = true; needsDisplay = true } }
-    var pixelAligned = false { didSet { needsLayout = true } }
-    var onButton: ((DeviceCommand) -> Void)?
-    var onDuoProjectionWidthChange: ((CGFloat) -> Void)?
-    var duoProjectionSizeFractions: CGSize {
-        guard let fraction = duoModel?.projectedWidthFraction else { return CGSize(width: 1, height: 1) }
-        // The 3D hardware follows the requested device orientation. The inner
-        // and cover displays have different native texture rotations, but that
-        // must not move the physical resize handles to a different axis.
-        return screen.quarterTurns.isMultiple(of: 2)
-            ? CGSize(width: fraction, height: 1)
-            : CGSize(width: 1, height: fraction)
+    func containsDuoResizeFrame(at point: CGPoint) -> Bool {
+        guard showsBezels, let duoModel else { return false }
+        return duoModel.containsResizeFrame(at: duoModel.convert(point, from: self))
     }
+    let screen: SimulatorScreenView
+    var chrome: DeviceChrome { didSet {
+        duoModel?.setDisplayChrome(chrome)
+        pressed = nil; needsLayout = true; needsDisplay = true
+    } }
+    var scale: CGFloat = 1 { didSet { if oldValue != scale { needsLayout = true; needsDisplay = true } } }
+    var showsBezels = true { didSet { if oldValue != showsBezels { pressed = nil; needsLayout = true; needsDisplay = true } } }
+    var pixelAligned = false { didSet { if oldValue != pixelAligned { needsLayout = true } } }
+    var onButton: ((DeviceCommand) -> Void)?
     private var pressed: Int?
     private var duoModel: DuoModelView?
     var hasDuoModel: Bool { duoModel != nil }
     var duoResizeCornerPoints: [DeviceResizeCorner: CGPoint]? {
         guard showsBezels, let duoModel else { return nil }
         return duoModel.resizeCornerPoints.mapValues { convert($0, from: duoModel) }
+    }
+    var duoHardwareBounds: CGRect? {
+        guard showsBezels, let duoModel else { return nil }
+        return convert(duoModel.projectedHardwareBounds, from: duoModel)
+    }
+    var duoMaximumProjectedSpan: CGFloat { duoModel?.maximumProjectedSpan ?? 1 }
+    var duoToolbarWidthFraction: CGFloat { duoModel?.toolbarWidthFraction ?? 1 }
+    var anchorsDuoToTop = false {
+        didSet { duoModel?.anchorsHardwareToTop = anchorsDuoToTop }
     }
     override var isFlipped: Bool { true }
     private var geometry: ChromeGeometry {
@@ -452,36 +459,9 @@ struct ChromeGeometry {
         screen.wantsLayer = true
         screen.layer?.masksToBounds = true
         screen.layer?.cornerCurve = .continuous
-        screen.onDisplayChange = { [weak self] display in
-            guard let self else { return }
-            self.duoModel?.updateDisplay(display, engine: self.screen.renderer.engine,
-                chrome: self.screen.displayChrome ?? self.chrome)
-        }
-        duoModel?.onProjectionWidthChange = { [weak self] fraction in
-            self?.onDuoProjectionWidthChange?(fraction)
-        }
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-
-    func updateDuoDisplay(_ display: SIDisplay, chrome: DeviceChrome) {
-        duoModel?.updateDisplay(display, engine: screen.renderer.engine, chrome: chrome)
-    }
-
-    func setHingeAngle(_ angle: CGFloat) {
-        duoModel?.setHingeAngle(angle, chrome: chrome, screen: screen)
-    }
-#if DEBUG
-    func duoSnapshot() -> NSImage? { duoModel?.snapshot() }
-#endif
-
-    override func layout() {
-        super.layout()
-        if let duoModel, showsBezels {
-            duoModel.isHidden = false
-            duoModel.frame = bounds
-            duoModel.configure(chrome: chrome, screen: screen)
-            screen.frame = bounds
-            screen.gestureOverlay.frame = screen.frame
+        if let duoModel {
+            // Duo never switches to bezel-free rendering. Install its input
+            // mapping and suspend the flat renderer once, not on each layout.
             screen.renderer.layer.isHidden = true
             screen.renderer.layer.opacity = 0
             screen.renderer.setEnabled(false)
@@ -495,10 +475,41 @@ struct ChromeGeometry {
                 guard let screen, let duoModel, let projected = duoModel.projectedScreenPoint(point) else { return nil }
                 return screen.convert(projected, from: duoModel)
             }
-            needsDisplay = true
+        }
+        screen.onDisplayChange = { [weak self] display in
+            guard let self else { return }
+            self.duoModel?.updateDisplay(display, engine: self.screen.renderer.engine,
+                chrome: self.screen.displayChrome ?? self.chrome)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    func updateDuoDisplay(_ display: SIDisplay, chrome: DeviceChrome) {
+        duoModel?.updateDisplay(display, engine: screen.renderer.engine, chrome: chrome)
+    }
+
+    func setHingeAngle(_ angle: CGFloat) {
+        duoModel?.setHingeAngle(angle, chrome: chrome, screen: screen)
+    }
+    func setRenderedDuoPose(_ pose: DuoRenderPose) {
+        duoModel?.setRenderedPose(pose, chrome: chrome)
+    }
+    func requestDuoPanel(cover: Bool) {
+        duoModel?.requestPanel(cover: cover, engine: screen.renderer.engine)
+    }
+#if DEBUG
+    func duoSnapshot() -> NSImage? { duoModel?.snapshotCurrentPose() }
+    var duoCameraUpdateCount: Int { duoModel?.cameraUpdateCount ?? 0 }
+#endif
+
+    override func layout() {
+        super.layout()
+        if let duoModel {
+            if duoModel.frame != bounds { duoModel.frame = bounds }
+            if screen.frame != bounds { screen.frame = bounds }
+            if screen.gestureOverlay.frame != screen.frame { screen.gestureOverlay.frame = screen.frame }
             return
         }
-        duoModel?.isHidden = true
         screen.renderer.layer.isHidden = false
         screen.renderer.layer.opacity = 1
         screen.renderer.setEnabled(true)

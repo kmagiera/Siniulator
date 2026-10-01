@@ -3,6 +3,60 @@ import XCTest
 @testable import Siniulator
 
 final class ResizeTests: XCTestCase {
+    private let duoToolbar = DuoToolbarSizing(widthFraction: 0.7, minimumWidth: 400)
+
+    func testDuoCornersScaleHardwareAndToolbarAndPreserveItsOppositeCorner() {
+        let device = CGRect(x: 450, y: 400, width: 300, height: 410)
+        let header: CGFloat = 52
+        let original = CGRect(x: device.midX - 261, y: device.minY - 16, width: 522, height: 498)
+        for corner in DeviceResizeCorner.allCases {
+            let session = DuoResizeSession(corner: corner, initialFrame: original, initialDevice: device,
+                initialPointer: .zero, initialViewport: 700, headerHeight: header,
+                visibleFrame: CGRect(x: 0, y: 0, width: 2000, height: 1500), toolbarSizing: duoToolbar)
+            XCTAssertEqual(session.geometry(at: .zero).frame, original)
+            let next = session.geometry(at: CGPoint(x: corner.isLeft ? -30 : 30, y: corner.isTop ? 41 : -41))
+            XCTAssertEqual(next.viewport, 770, accuracy: 0.001)
+            XCTAssertEqual(next.frame.width, 572)
+            XCTAssertEqual(next.frame.height, 539)
+            let projected = CGRect(x: next.frame.midX - 165, y: next.frame.maxY - header - 20 - 451,
+                width: 330, height: 451)
+            XCTAssertEqual(corner.isLeft ? projected.maxX : projected.minX,
+                corner.isLeft ? device.maxX : device.minX, accuracy: 0.001)
+            XCTAssertEqual(corner.isTop ? projected.minY : projected.maxY,
+                corner.isTop ? device.minY : device.maxY, accuracy: 0.001)
+        }
+    }
+
+    func testDuoResizeClampsCompleteSweepToDisplayAndDoesNotSaveToolbarSlack() {
+        let device = CGRect(x: 600, y: -800, width: 240, height: 310)
+        let original = CGRect(x: device.midX - 226, y: device.minY - 16, width: 452, height: 398)
+        let display = CGRect(x: 0, y: -1000, width: 1512, height: 950)
+        for corner in DeviceResizeCorner.allCases {
+            let session = DuoResizeSession(corner: corner, initialFrame: original, initialDevice: device,
+                initialPointer: .zero, initialViewport: 600, headerHeight: 52, visibleFrame: display, toolbarSizing: duoToolbar)
+            let expanded = session.geometry(at: CGPoint(x: corner.isLeft ? -10000 : 10000,
+                y: corner.isTop ? 10000 : -10000))
+            XCTAssertEqual(expanded.viewport, 862)
+            XCTAssertTrue(display.contains(expanded.frame))
+            let shrunk = session.geometry(at: CGPoint(x: corner.isLeft ? 10000 : -10000,
+                y: corner.isTop ? -10000 : 10000))
+            XCTAssertEqual(shrunk.viewport, 280)
+            XCTAssertEqual(shrunk.frame.width, 432)
+            XCTAssertEqual(shrunk.frame.height, ceil(310 * 280 / 600 + 88))
+        }
+    }
+    func testDuoMaximumSizeUsesProjectedSweepNotEmptySquareViewport() {
+        let device = CGRect(x: 600, y: 500, width: 240, height: 310)
+        let session = DuoResizeSession(corner: .bottomRight,
+            initialFrame: CGRect(x: 394, y: 484, width: 652, height: 398),
+            initialDevice: device, initialPointer: .zero, initialViewport: 700,
+            headerHeight: 52, visibleFrame: CGRect(x: 0, y: 0, width: 1512, height: 950),
+            toolbarSizing: duoToolbar, maximumSpan: 0.6)
+        let expanded = session.geometry(at: CGPoint(x: 10000, y: -10000))
+        XCTAssertEqual(expanded.viewport, 862 / 0.6, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(expanded.frame.height, 950)
+        XCTAssertGreaterThan(expanded.frame.height, 700, "Do not limit the phone using the unused render-surface margins")
+    }
     func testDuoResizeUsesTheWiderToolbarWhenCrossingCompactWidth() {
         let device = CGSize(width: 600, height: 440)
         let initial = CGRect(x: 100, y: 300, width: 624, height: 512)

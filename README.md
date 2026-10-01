@@ -27,7 +27,7 @@ With Xcode 27, [Device Hub](https://developer.apple.com/videos/play/wwdc2026/260
 ## Features
 
 - **Individual device windows** — use several simulators side by side, resize them, go full screen, or keep a window on top.
-- **Compact interface** — keep the focus on the device screen, with an option to hide device bezels.
+- **Compact interface** — keep the focus on the device screen, with an option to hide ordinary-device bezels. Duo retains its 3D hardware frame.
 - **Precise scaling** — choose Point Accurate, Pixel Accurate, or Physical Size to view the device at the scale you need.
 - **Familiar shortcuts** — control the active device with the Simulator shortcuts you already know.
 - **Multi-Touch** — pinch and rotate with Option-drag, move both fingers with Option-Shift, or pinch with your trackpad.

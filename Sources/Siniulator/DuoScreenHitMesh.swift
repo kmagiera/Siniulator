@@ -5,73 +5,24 @@ import simd
 /// display reliably. Intersect its presented triangles, retaining the model's
 /// independent position/UV indices rather than an approximate screen rectangle.
 @MainActor final class DuoScreenHitMesh {
-    private let source: SCNNode
-    private let vertices: [SIMD4<Float>]
-    private let influences: [[(index: Int, weight: Float)]]
-    private let inverseBinds: [simd_float4x4]
-    private let bind: simd_float4x4
+    private let mesh: DuoMesh
     private struct Triangle { let positions: SIMD3<Int>; let uv: [SIMD2<Float>] }
     private let triangles: [Triangle]
     private var posed: [SIMD3<Float>] = []
     private var lastTransforms: [simd_float4x4] = []
 
     init?(node: SCNNode) {
-        guard let geometry = node.geometry,
-              let positions = geometry.sources(for: .vertex).first,
-              let values = Self.components(positions), positions.componentsPerVector == 3 else { return nil }
-        source = node
-        guard let triangles = Self.triangles(geometry) else { return nil }
+        guard let geometry = node.geometry, let mesh = DuoMesh(node: node),
+              let triangles = Self.triangles(geometry) else { return nil }
+        self.mesh = mesh
         self.triangles = triangles
-        vertices = stride(from: 0, to: values.count, by: 3).map {
-            SIMD4(Float(values[$0]), Float(values[$0 + 1]), Float(values[$0 + 2]), 1)
-        }
-        if let skin = node.skinner {
-            bind = simd_float4x4(skin.baseGeometryBindTransform)
-            inverseBinds = skin.boneInverseBindTransforms?.map { simd_float4x4($0.scnMatrix4Value) }
-                ?? Array(repeating: matrix_identity_float4x4, count: skin.bones.count)
-            guard inverseBinds.count == skin.bones.count else { return nil }
-            let weights: SCNGeometrySource? = skin.boneWeights
-            let indices: SCNGeometrySource? = skin.boneIndices
-            if let weights, let indices, weights.vectorCount > 0 {
-                guard weights.vectorCount == vertices.count, indices.vectorCount == vertices.count,
-                      weights.componentsPerVector == indices.componentsPerVector,
-                      let w = Self.components(weights), let b = Self.components(indices),
-                      b.allSatisfy({ $0 >= 0 && $0 < Double(skin.bones.count) && $0.rounded() == $0 })
-                else { return nil }
-                let count = weights.componentsPerVector
-                influences = vertices.indices.map { vertex in
-                    (0..<count).map { (Int(b[vertex * count + $0]), Float(w[vertex * count + $0])) }
-                }
-            } else {
-                // The rigid cover uses a one-bone skinner without weight data.
-                guard skin.bones.count == 1 else { return nil }
-                influences = vertices.map { _ in [(0, 1)] }
-            }
-        } else {
-            bind = matrix_identity_float4x4
-            inverseBinds = []
-            influences = []
-        }
     }
 
     private func updatePose() {
-        let transforms: [simd_float4x4]
-        if let skin = source.skinner {
-            transforms = skin.bones.enumerated().map { index, bone in
-                bone.presentation.simdWorldTransform * inverseBinds[index] * bind
-            }
-        } else {
-            transforms = [source.presentation.simdWorldTransform]
-        }
+        let transforms = mesh.transforms
         if transforms != lastTransforms {
-            posed = vertices.enumerated().map { index, vertex -> SIMD3<Float> in
-                let point: SIMD4<Float>
-                if influences.isEmpty { point = transforms[0] * vertex }
-                else {
-                    point = influences[index].reduce(SIMD4<Float>.zero) {
-                        $0 + (transforms[$1.index] * vertex) * $1.weight
-                    }
-                }
+            posed = mesh.vertices.indices.map { index in
+                let point = mesh.position(at: index, using: transforms)
                 return SIMD3(point.x, point.y, point.z)
             }
             lastTransforms = transforms
@@ -108,7 +59,8 @@ import simd
     /// UV of the closest point on the projected mesh, after a drag misses it.
     /// Looking at every triangle edge also covers rounded corners and cutouts.
     func nearestTextureCoordinate(to point: CGPoint, project: (SCNVector3) -> SCNVector3,
-                                  unproject: (SCNVector3) -> SCNVector3) -> CGPoint? {
+                                  unproject: (SCNVector3) -> SCNVector3,
+                                  maximumDistance: CGFloat = .infinity) -> CGPoint? {
         updatePose()
         let projected = posed.map { position -> SIMD3<Float> in
             let p = project(SCNVector3(position.x, position.y, position.z))
@@ -139,6 +91,7 @@ import simd
                 }
             }
         }
+        guard distance <= Float(maximumDistance * maximumDistance) else { return nil }
         return best.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
     }
 
@@ -184,7 +137,7 @@ import simd
     private static func triangles(_ geometry: SCNGeometry) -> [Triangle]? {
         guard let positionSource = geometry.sources.firstIndex(where: { $0.semantic == .vertex }),
               let uvSource = geometry.sources.firstIndex(where: { $0.semantic == .texcoord }),
-              let uvValues = components(geometry.sources[uvSource]),
+              let uvValues = DuoMesh.components(geometry.sources[uvSource]),
               geometry.sources[uvSource].componentsPerVector == 2 else { return nil }
         let uv = stride(from: 0, to: uvValues.count, by: 2).map {
             SIMD2<Float>(Float(uvValues[$0]), Float(uvValues[$0 + 1]))
@@ -236,32 +189,4 @@ import simd
         return result.isEmpty ? nil : result
     }
 
-    /// Validate imported buffers before reading them; an unfamiliar local SDK
-    /// model must fail closed, not perform an out-of-bounds or unaligned load.
-    private static func components(_ source: SCNGeometrySource) -> [Double]? {
-        let size = source.bytesPerComponent
-        guard source.vectorCount > 0, source.componentsPerVector > 0,
-              source.dataOffset >= 0, source.dataStride >= source.componentsPerVector * size,
-              [1, 2, 4, 8].contains(size),
-              !source.usesFloatComponents || [4, 8].contains(size),
-              source.dataOffset + (source.vectorCount - 1) * source.dataStride
-                + source.componentsPerVector * size <= source.data.count else { return nil }
-        return source.data.withUnsafeBytes { data in
-            (0..<source.vectorCount).flatMap { vector in
-                (0..<source.componentsPerVector).map { component -> Double in
-                    let offset = source.dataOffset + vector * source.dataStride + component * size
-                    if source.usesFloatComponents {
-                        return size == 4 ? Double(data.loadUnaligned(fromByteOffset: offset, as: Float.self))
-                            : data.loadUnaligned(fromByteOffset: offset, as: Double.self)
-                    }
-                    switch size {
-                    case 1: return Double(data.loadUnaligned(fromByteOffset: offset, as: UInt8.self))
-                    case 2: return Double(data.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
-                    case 4: return Double(data.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
-                    default: return Double(data.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
-                    }
-                }
-            }
-        }
-    }
 }
