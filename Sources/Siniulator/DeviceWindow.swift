@@ -72,7 +72,7 @@ enum DeviceCommand: Int {
 #if DEBUG
     var diagnosticCollectMotion = false
     var diagnosticMotionFrames: [(time: Double, angle: Double, turns: Double, cost: Double,
-        frame: CGRect, hardware: CGRect, toolbar: CGRect, viewport: CGFloat)] = []
+        frame: CGRect, hardware: CGRect, toolbar: CGRect, viewport: CGFloat, trafficLights: [CGRect])] = []
     func diagnosticMagnify(_ delta: Double, phase: NSEvent.Phase) { handleDuoMagnify(delta: delta, phase: phase) }
     var diagnosticConnectedScreenID: UInt32? { connectedScreenID }
     var diagnosticDisplaySwitchInProgress: Bool { displaySwitchTask != nil }
@@ -531,7 +531,8 @@ enum DeviceCommand: Int {
 #if DEBUG
         if diagnosticCollectMotion {
             diagnosticMotionFrames.append((link.timestamp, currentHingeAngle, duoMotion.roll.value, CACurrentMediaTime() - started,
-                window?.frame ?? .zero, presentation.visualDeviceRect, presentation.controls.frame, presentation.duoViewportSide))
+                window?.frame ?? .zero, presentation.visualDeviceRect, presentation.controls.frame, presentation.duoViewportSide,
+                presentation.controls.windowButtons.map { presentation.controls.convert($0.bounds, from: $0) }))
         }
 #endif
         if duoMotion.isSettled { stopMotion() }
