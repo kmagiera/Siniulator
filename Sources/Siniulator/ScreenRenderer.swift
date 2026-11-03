@@ -3,6 +3,7 @@ import Metal
 import QuartzCore
 import IOSurface
 import CoreImage
+import MetalPerformanceShaders
 import SimulatorBridge
 
 final class MetalScreenEngine: Sendable {
@@ -29,6 +30,7 @@ final class MetalScreenEngine: Sendable {
             if (turn == 2) uv = 1-uv;
             if (turn == 3) uv = float2(1-uv.y,uv.x);
             constexpr sampler s(filter::linear, address::clamp_to_edge);
+            // Lanczos handles downscaling before this pass; preserve its 1:1 pixels.
             return float4(image.sample(s,uv).rgb,1);
         }
         """, options: nil)
@@ -54,11 +56,27 @@ final class MetalScreenEngine: Sendable {
         descriptor.usage = .shaderRead
         return device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0)
     }
-    func encode(source: MTLTexture, target: MTLTexture, turns: Int, command: MTLCommandBuffer) {
+    func encode(source: MTLTexture, target: MTLTexture, turns: Int, command: MTLCommandBuffer, downscaler: ScreenDownscaler? = nil) {
         let turns = ScreenGeometry.normalizedQuarterTurns(turns)
         let size = turns % 2 == 0 ? CGSize(width: source.width, height: source.height) : CGSize(width: source.height, height: source.width)
         let rect = ScreenGeometry.imageRect(image: size, in: CGRect(x: 0, y: 0, width: target.width, height: target.height))
         var scale = SIMD2<Float>(Float(rect.width / CGFloat(target.width)), Float(rect.height / CGFloat(target.height)))
+        var source = source, viewport: MTLViewport?
+        // Shrinking a 3x framebuffer (e.g. onto a 1x external display) in the
+        // fragment shader stays soft. Lanczos it to the exact on-screen pixel
+        // size first, then draw it 1:1 into a whole-pixel viewport.
+        if let downscaler, rect.width < size.width - 0.5 {
+            let pixels = CGRect(x: rect.minX.rounded(), y: rect.minY.rounded(),
+                                width: max(1, rect.width.rounded()), height: max(1, rect.height.rounded()))
+            let width = Int(turns % 2 == 0 ? pixels.width : pixels.height)
+            let height = Int(turns % 2 == 0 ? pixels.height : pixels.width)
+            if let scaled = downscaler.scale(source, width: width, height: height, command: command) {
+                source = scaled
+                scale = SIMD2(1, 1)
+                viewport = MTLViewport(originX: pixels.minX, originY: pixels.minY,
+                                       width: pixels.width, height: pixels.height, znear: 0, zfar: 1)
+            }
+        }
         var turn = UInt32(turns)
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
@@ -67,6 +85,7 @@ final class MetalScreenEngine: Sendable {
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0.035, 0.035, 0.045, 1)
         guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.setRenderPipelineState(pipeline)
+        if let viewport { encoder.setViewport(viewport) }
         encoder.setVertexBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
         encoder.setFragmentBytes(&turn, length: MemoryLayout<UInt32>.size, index: 0)
         encoder.setFragmentTexture(source, index: 0)
@@ -85,6 +104,25 @@ final class MetalScreenEngine: Sendable {
         if flipForAppKit { output = output.transformed(by: CGAffineTransform(translationX: 0, y: bounds.height).scaledBy(x: 1, y: -1)) }
         images.render(output, to: target, commandBuffer: command,
             bounds: bounds, colorSpace: CGColorSpaceCreateDeviceRGB())
+    }
+}
+
+// Owned by one render queue: MPS kernels and the scratch texture are not shared.
+final class ScreenDownscaler {
+    private let lanczos: MPSImageLanczosScale
+    private var scratch: MTLTexture?
+    init(device: MTLDevice) { lanczos = MPSImageLanczosScale(device: device) }
+    func scale(_ source: MTLTexture, width: Int, height: Int, command: MTLCommandBuffer) -> MTLTexture? {
+        if scratch?.width != width || scratch?.height != height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+                width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            scratch = lanczos.device.makeTexture(descriptor: descriptor)
+        }
+        guard let scratch else { return nil }
+        lanczos.encode(commandBuffer: command, sourceTexture: source, destinationTexture: scratch)
+        return scratch
     }
 }
 
@@ -108,8 +146,10 @@ final class ScreenRenderer: @unchecked Sendable {
     private var enabled = true
     private var cachedSurface: IOSurface?
     private var cachedTexture: MTLTexture?
+    private let downscaler: ScreenDownscaler
     @MainActor init() throws {
         engine = try MetalScreenEngine.shared.get()
+        downscaler = ScreenDownscaler(device: engine.device)
         guard let commands = engine.device.makeCommandQueue() else { throw SimulatorError(message: "Metal command queue is unavailable.") }
         self.commands = commands
         layer.device = engine.device
@@ -159,7 +199,7 @@ final class ScreenRenderer: @unchecked Sendable {
             cachedSurface = surface
             cachedTexture = engine.texture(for: surface)
         }
-        if let source = cachedTexture { engine.encode(source: source, target: drawable.texture, turns: turns, command: command) }
+        if let source = cachedTexture { engine.encode(source: source, target: drawable.texture, turns: turns, command: command, downscaler: downscaler) }
         else { engine.encodeReference(surface: surface, target: drawable.texture, turns: turns, command: command, flipForAppKit: true) }
         command.addCompletedHandler { [weak self, surface] _ in
             _ = surface // Keep the shared framebuffer alive until GPU reads finish.

@@ -516,8 +516,10 @@ struct ChromeGeometry {
         screen.coordinateMapper = nil
         screen.coordinateProjector = nil
         let frame = ChromeGeometry.placed(geometry.screen, in: bounds, scale: scale)
-        screen.frame = pixelAligned ? backingAlignedRect(frame,
-            options: [.alignMinXNearest, .alignMinYNearest, .alignWidthNearest, .alignHeightNearest]) : frame
+        // Always snap to whole backing pixels: a fractional frame makes the
+        // compositor resample the drawable, which blurs it on 1x displays.
+        screen.frame = backingAlignedRect(frame,
+            options: [.alignMinXNearest, .alignMinYNearest, .alignWidthNearest, .alignHeightNearest])
         screen.gestureOverlay.frame = screen.frame
         screen.layer?.cornerRadius = chrome.cornerRadius * scale
         screen.layer?.masksToBounds = true

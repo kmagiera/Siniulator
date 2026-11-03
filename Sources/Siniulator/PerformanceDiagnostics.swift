@@ -78,6 +78,7 @@ enum PerformanceDiagnostics {
         guard let source = engine.texture(for: surface), let queue = engine.device.makeCommandQueue() else {
             throw BenchmarkError(message: "IOSurface texture or command queue unavailable.", exitCode: 1)
         }
+        let downscaler = ScreenDownscaler(device: engine.device)
         let scenarios = [("window-portrait", 600, 1280, 0), ("window-landscape", 1280, 600, 1),
                          ("window-retina", 1200, 2560, 0), ("full-screen-portrait", 1920, 1080, 0)]
         func target(width: Int, height: Int) throws -> MTLTexture {
@@ -91,7 +92,7 @@ enum PerformanceDiagnostics {
             guard let command = queue.makeCommandBuffer() else { throw BenchmarkError(message: "Command buffer unavailable.", exitCode: 1) }
             let start = CACurrentMediaTime()
             if reference { engine.encodeReference(surface: surface, target: target, turns: turn, command: command) }
-            else { engine.encode(source: source, target: target, turns: turn, command: command) }
+            else { engine.encode(source: source, target: target, turns: turn, command: command, downscaler: downscaler) }
             let cpu = (CACurrentMediaTime() - start) * 1000
             // Waiting and pixel readback are benchmark-only. Neither operation
             // is in the normal renderer, and neither counts towards CPU encode.
