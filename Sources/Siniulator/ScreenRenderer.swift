@@ -30,21 +30,8 @@ final class MetalScreenEngine: Sendable {
             if (turn == 2) uv = 1-uv;
             if (turn == 3) uv = float2(1-uv.y,uv.x);
             constexpr sampler s(filter::linear, address::clamp_to_edge);
-            // Downscaling (e.g. a 3x framebuffer on a 1x external display) with a
-            // single bilinear tap skips source pixels and looks soft/aliased.
-            // Average an n×n grid of taps covering this pixel's footprint.
-            float2 size = float2(image.get_width(), image.get_height());
-            float2 dx = dfdx(uv), dy = dfdy(uv);
-            float footprint = max(length(dx * size), length(dy * size));
-            int n = clamp(int(ceil(footprint)), 1, 4);
-            float3 sum = 0;
-            for (int j = 0; j < n; j++) {
-                for (int i = 0; i < n; i++) {
-                    float2 o = (float2(i, j) + 0.5) / float(n) - 0.5;
-                    sum += image.sample(s, uv + o.x * dx + o.y * dy).rgb;
-                }
-            }
-            return float4(sum / float(n * n), 1);
+            // Lanczos handles downscaling before this pass; preserve its 1:1 pixels.
+            return float4(image.sample(s,uv).rgb,1);
         }
         """, options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
